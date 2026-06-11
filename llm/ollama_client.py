@@ -9,23 +9,25 @@ Groq, Gemini, OpenRouter и OpenAI ходят через OpenAI-совмести
 независимо от выбранного провайдера ответов.
 """
 import anthropic
-import google.generativeai as _genai
 import ollama
+from google import genai
+from google.genai import types
 from openai import OpenAI
 
 import config
 
 
 def gemini_embed(texts: list[str]) -> list[list[float]]:
-    """Эмбеддинги через Gemini text-embedding-004 (бесплатно, мультиязычно)."""
+    """Эмбеддинги через Gemini embedding (мультиязычно, задача retrieval)."""
     if not texts:
         return []
-    _genai.configure(api_key=config.GEMINI_API_KEY)
-    result = _genai.embed_content(
-        model="models/text-embedding-004",
-        content=texts,
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+    result = client.models.embed_content(
+        model="gemini-embedding-exp-03-07",
+        contents=texts,
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
     )
-    return result["embedding"]
+    return [e.values for e in result.embeddings]
 
 
 class OllamaClient:
