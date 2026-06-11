@@ -1,0 +1,15 @@
+# Секреты
+.env
+
+# Локальные данные
+chroma_db/
+bot-memory/
+K:/OBSIDIAN/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Локальные настройки инструментов
+.claude/

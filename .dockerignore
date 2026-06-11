@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.example
+.venv
+chroma_db
+bot-memory
+__pycache__
+*.pyc
+Dockerfile
+docker-compose.yml
+README.md
+start_bot.bat
