@@ -11,21 +11,19 @@ Groq, Gemini, OpenRouter и OpenAI ходят через OpenAI-совмести
 import anthropic
 import ollama
 from google import genai
-from google.genai import types
 from openai import OpenAI
 
 import config
 
 
 def gemini_embed(texts: list[str]) -> list[list[float]]:
-    """Эмбеддинги через Gemini embedding (мультиязычно, задача retrieval)."""
+    """Эмбеддинги через Gemini gemini-embedding-001 (мультиязычно)."""
     if not texts:
         return []
     client = genai.Client(api_key=config.GEMINI_API_KEY)
     result = client.models.embed_content(
-        model="gemini-embedding-exp-03-07",
+        model="gemini-embedding-001",
         contents=texts,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
     )
     return [e.values for e in result.embeddings]
 
