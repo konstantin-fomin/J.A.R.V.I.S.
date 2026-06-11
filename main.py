@@ -1,13 +1,23 @@
-"""Точка входа: проверяет окружение, синхронизирует память, запускает бота."""
+"""Точка входа: проверки, синхронизация памяти, запуск Telegram-бота и веба.
+
+Telegram polling работает в отдельном потоке, веб-интерфейс (FastAPI/uvicorn)
+— в главном. Ctrl+C останавливает uvicorn, поток бота — daemon и умирает вместе
+с процессом.
+"""
 import logging
 import sys
+import threading
+
+import uvicorn
 
 import config
-from bot.telegram_bot import run_bot
+from bot.telegram_bot import run_bot_in_thread
 from llm.ollama_client import LLMClient, OllamaClient, gemini_embed
 from memory.chroma import ChromaIndex
+from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from memory.obsidian import ObsidianVault
+from web.server import create_app
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
@@ -23,7 +33,7 @@ def check_environment(ollama_client: OllamaClient, llm: LLMClient) -> None:
     if not config.GEMINI_API_KEY:
         sys.exit(
             "GEMINI_API_KEY не задан в .env.\n"
-            "Он нужен для семантического поиска по памяти (text-embedding-004).\n"
+            "Он нужен для семантического поиска по памяти (эмбеддинги).\n"
             "Задай его даже если LLM_PROVIDER не gemini."
         )
     # Ollama нужен только для локальных ответов
@@ -53,6 +63,7 @@ def main() -> None:
     vault = ObsidianVault(config.OBSIDIAN_VAULT_PATH)
     index = ChromaIndex(config.CHROMA_PERSIST_DIR, gemini_embed)
     memory = MemoryManager(vault, index, config.MAX_MEMORY_RESULTS)
+    facts = FactExtractor(llm, memory)
 
     logger.info("Синхронизация памяти с %s ...", config.OBSIDIAN_VAULT_PATH)
     changed = memory.sync()
@@ -61,7 +72,23 @@ def main() -> None:
     logger.info(
         "Запуск Telegram-бота (провайдер: %s, модель: %s)", llm.provider, llm.model
     )
-    run_bot(config.TELEGRAM_BOT_TOKEN, memory, llm)
+    bot_thread = threading.Thread(
+        target=run_bot_in_thread,
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts),
+        daemon=True,
+        name="telegram-polling",
+    )
+    bot_thread.start()
+
+    logger.info(
+        "Веб-интерфейс: http://%s:%d", config.WEB_HOST, config.WEB_PORT
+    )
+    uvicorn.run(
+        create_app(memory, llm, facts),
+        host=config.WEB_HOST,
+        port=config.WEB_PORT,
+        log_level="warning",
+    )
 
 
 if __name__ == "__main__":

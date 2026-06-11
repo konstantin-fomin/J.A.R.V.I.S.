@@ -49,6 +49,23 @@ class ObsidianVault:
             return True
         return False
 
+    def append_fact(self, rel_path: str, fact: str) -> bool:
+        """Дописывает факт в файл темы (создаёт файл при необходимости).
+
+        Возвращает False, если такой факт в файле уже есть.
+        """
+        path = self.root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            title = Path(rel_path).stem.replace("_", " ").capitalize()
+            path.write_text(f"# {title}\n\n## Факты\n\n", encoding="utf-8")
+        fact = fact.strip()
+        if fact in path.read_text(encoding="utf-8"):
+            return False
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"- {fact}\n")
+        return True
+
     def append_journal(self, author: str, text: str) -> str:
         """Дописывает запись в журнал за сегодня. Возвращает относительный путь файла."""
         now = datetime.now()

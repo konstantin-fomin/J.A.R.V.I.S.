@@ -1,4 +1,6 @@
 """Единый интерфейс памяти: Obsidian (хранение) + ChromaDB (поиск)."""
+from datetime import date, timedelta
+
 from memory.chroma import ChromaIndex
 from memory.obsidian import ObsidianVault
 
@@ -26,6 +28,32 @@ class MemoryManager:
         """Записывает сообщение в журнал и обновляет индекс."""
         rel_path = self.vault.append_journal(author, text)
         self.index.reindex_file(rel_path, self.vault.read_file(rel_path))
+
+    def add_fact(self, rel_path: str, fact: str) -> bool:
+        """Дописывает факт в файл темы и переиндексирует его. False — дубль."""
+        if not self.vault.append_fact(rel_path, fact):
+            return False
+        self.index.reindex_file(rel_path, self.vault.read_file(rel_path))
+        return True
+
+    def goals(self) -> str:
+        """Содержимое goals.md (пустая строка, если файла нет)."""
+        try:
+            return self.vault.read_file("goals.md")
+        except FileNotFoundError:
+            return ""
+
+    def recent_journal(self, days: int = 3) -> str:
+        """Журнал за последние N дней одним текстом (включая сегодня)."""
+        parts = []
+        today = date.today()
+        for offset in range(days - 1, -1, -1):
+            day = today - timedelta(days=offset)
+            try:
+                parts.append(self.vault.read_file(f"journal/{day:%Y-%m-%d}.md"))
+            except FileNotFoundError:
+                continue
+        return "\n\n".join(parts)
 
     def list_files(self) -> list[str]:
         return self.vault.list_files()

@@ -1,4 +1,5 @@
 """Обработчики команд и сообщений Telegram-бота."""
+import asyncio
 import logging
 from datetime import date
 
@@ -7,7 +8,8 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 import config
-from llm.ollama_client import OllamaClient
+from llm.ollama_client import LLMClient
+from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 
 logger = logging.getLogger(__name__)
@@ -17,12 +19,29 @@ TELEGRAM_MAX_LEN = 4096
 START_TEXT = """Привет! Я твой личный ассистент с памятью.
 
 Просто пиши мне — я отвечаю с учётом всего, что знаю о тебе.
-Всё общение сохраняется в журнал в Obsidian.
+Всё общение сохраняется в журнал в Obsidian, а важные факты
+я сам раскладываю по темам в память.
 
 Команды:
+/plan — план на день с учётом твоих целей и журнала
 /memory — что я о тебе помню (список файлов)
 /forget <тема> — удалить файл памяти
 📓 в начале сообщения — записать в дневник без ответа"""
+
+PLAN_PROMPT = """Ты — личный ассистент. Составь план дня для пользователя.
+
+Сегодня: {date}
+
+Цели пользователя (goals.md):
+{goals}
+
+Журнал за последние 3 дня:
+{journal}
+
+Ответь структурированно и кратко, на русском:
+🎯 Приоритеты на день — 1–3 главных пункта
+📋 Задачи — конкретные шаги
+💡 Советы — с учётом целей и контекста жизни пользователя"""
 
 
 def _split_message(text: str) -> list[str]:
@@ -43,14 +62,37 @@ def _allowed(update: Update) -> bool:
 
 
 class Handlers:
-    def __init__(self, memory: MemoryManager, llm: OllamaClient):
+    def __init__(self, memory: MemoryManager, llm: LLMClient, facts: FactExtractor):
         self.memory = memory
         self.llm = llm
+        self.facts = facts
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
             return
         await update.message.reply_text(START_TEXT)
+
+    async def plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _allowed(update):
+            return
+        await update.message.chat.send_action(ChatAction.TYPING)
+        prompt = PLAN_PROMPT.format(
+            date=date.today().isoformat(),
+            goals=self.memory.goals() or "(целей пока нет)",
+            journal=self.memory.recent_journal(days=3) or "(журнал пуст)",
+        )
+        try:
+            answer = await asyncio.to_thread(
+                self.llm.chat, [{"role": "user", "content": prompt}]
+            )
+        except Exception:
+            logger.exception("Ошибка при составлении плана")
+            await update.message.reply_text(
+                "Не смог составить план 😔 Попробуй ещё раз."
+            )
+            return
+        for part in _split_message(answer):
+            await update.message.reply_text(part)
 
     async def show_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -108,11 +150,11 @@ class Handlers:
                 *history,
                 {"role": "user", "content": text},
             ]
-            answer = self.llm.chat(messages)
+            answer = await asyncio.to_thread(self.llm.chat, messages)
         except Exception:
             logger.exception("Ошибка при обработке сообщения")
             await update.message.reply_text(
-                "Что-то пошло не так 😔 Проверь, что Ollama запущен, и попробуй ещё раз."
+                "Что-то пошло не так 😔 Проверь настройки провайдера и попробуй ещё раз."
             )
             return
 
@@ -122,6 +164,11 @@ class Handlers:
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": answer})
         del history[:-config.MAX_HISTORY_MESSAGES]
+
+        # Фоновое извлечение фактов — не блокирует ответ пользователю
+        context.application.create_task(
+            asyncio.to_thread(self.facts.extract_and_save, text, answer)
+        )
 
         for part in _split_message(answer):
             await update.message.reply_text(part)

@@ -3,8 +3,13 @@ services:
     build: .
     env_file: .env
     environment:
-      # Переопределяет значение из .env: внутри контейнера путь к памяти свой
+      # Переопределяют значения из .env: внутри контейнера пути и хост свои
       - OBSIDIAN_VAULT_PATH=/app/bot-memory
+      - WEB_HOST=0.0.0.0
+    ports:
+      # Веб-интерфейс. На веб нет авторизации — наружу открывать только
+      # за reverse-proxy с auth; localhost-привязка оставляет доступ через SSH-туннель
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./bot-memory:/app/bot-memory
       - ./chroma_db:/app/chroma_db

@@ -36,6 +36,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# Веб-интерфейс. Хост по умолчанию локальный: на веб нет авторизации,
+# наружу его можно открывать только осознанно (в Docker — 0.0.0.0 внутри сети)
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.getenv("WEB_PORT") or 8000)
+
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # Если задан — бот отвечает только этому пользователю (его Telegram user id)

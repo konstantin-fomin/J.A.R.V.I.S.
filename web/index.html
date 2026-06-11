@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J.A.R.V.I.S.</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; background: #f4f5f7; color: #1c1e21;
+  }
+
+  /* Боковая панель: файлы памяти */
+  #sidebar {
+    width: 280px; min-width: 280px; background: #1f2733; color: #d7dce2;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #sidebar h1 { font-size: 18px; padding: 18px 16px 6px; color: #fff; }
+  #sidebar h2 { font-size: 12px; padding: 4px 16px 8px; color: #8b95a3;
+                text-transform: uppercase; letter-spacing: .06em; }
+  #files { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+  .file {
+    padding: 7px 10px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; word-break: break-all;
+  }
+  .file:hover { background: #2c3647; }
+  #refresh {
+    margin: 10px 16px 16px; padding: 7px; border: 1px solid #3a4556;
+    background: none; color: #d7dce2; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  #refresh:hover { background: #2c3647; }
+
+  /* Чат */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #messages { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  .msg {
+    max-width: 72%; padding: 10px 14px; border-radius: 14px;
+    white-space: pre-wrap; word-wrap: break-word; line-height: 1.45; font-size: 15px;
+  }
+  .msg.user { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.bot  { align-self: flex-start; background: #fff; border: 1px solid #e3e6ea; border-bottom-left-radius: 4px; }
+  .msg.error { align-self: flex-start; background: #fdecea; color: #b3261e; border: 1px solid #f5c6c0; }
+  .msg.typing { color: #8b95a3; font-style: italic; }
+
+  /* Поле ввода */
+  #inputbar { display: flex; gap: 10px; padding: 14px 24px 20px; background: #f4f5f7; }
+  #input {
+    flex: 1; padding: 12px 14px; font-size: 15px; font-family: inherit;
+    border: 1px solid #cfd4da; border-radius: 10px; outline: none; resize: none;
+  }
+  #input:focus { border-color: #2563eb; }
+  #send {
+    padding: 0 22px; font-size: 15px; border: none; border-radius: 10px;
+    background: #2563eb; color: #fff; cursor: pointer;
+  }
+  #send:disabled { background: #9db8ef; cursor: default; }
+
+  /* Просмотр файла памяти */
+  #overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    align-items: center; justify-content: center; padding: 30px;
+  }
+  #overlay.open { display: flex; }
+  #viewer {
+    background: #fff; border-radius: 12px; max-width: 760px; width: 100%;
+    max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  #viewer header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; border-bottom: 1px solid #e3e6ea; font-weight: 600;
+  }
+  #viewer header button { border: none; background: none; font-size: 20px; cursor: pointer; color: #6b7280; }
+  #viewer pre {
+    overflow: auto; padding: 18px; font-size: 13px; line-height: 1.5;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <h1>J.A.R.V.I.S.</h1>
+  <h2>Файлы памяти</h2>
+  <div id="files"></div>
+  <button id="refresh">Обновить список</button>
+</aside>
+
+<main id="main">
+  <div id="messages"></div>
+  <div id="inputbar">
+    <textarea id="input" rows="1" placeholder="Напиши сообщение…"></textarea>
+    <button id="send">➤</button>
+  </div>
+</main>
+
+<div id="overlay">
+  <div id="viewer">
+    <header>
+      <span id="viewer-title"></span>
+      <button id="viewer-close" title="Закрыть">✕</button>
+    </header>
+    <pre id="viewer-body"></pre>
+  </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById("messages");
+const inputEl = document.getElementById("input");
+const sendEl = document.getElementById("send");
+const filesEl = document.getElementById("files");
+const overlayEl = document.getElementById("overlay");
+
+function addMessage(text, cls) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+  inputEl.value = "";
+  sendEl.disabled = true;
+  addMessage(text, "user");
+  const typing = addMessage("думаю…", "bot typing");
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    const data = await res.json();
+    typing.remove();
+    if (!res.ok) {
+      addMessage(data.detail || "Ошибка сервера", "error");
+    } else {
+      addMessage(data.answer, "bot");
+      loadFiles(); // память могла пополниться
+    }
+  } catch (e) {
+    typing.remove();
+    addMessage("Нет связи с сервером: " + e.message, "error");
+  } finally {
+    sendEl.disabled = false;
+    inputEl.focus();
+  }
+}
+
+async function loadFiles() {
+  try {
+    const res = await fetch("/memory");
+    const data = await res.json();
+    filesEl.innerHTML = "";
+    for (const f of data.files) {
+      const div = document.createElement("div");
+      div.className = "file";
+      div.textContent = f;
+      div.onclick = () => openFile(f);
+      filesEl.appendChild(div);
+    }
+  } catch (e) { /* сервер ещё поднимается — не страшно */ }
+}
+
+async function openFile(name) {
+  const res = await fetch("/memory/" + encodeURIComponent(name).replaceAll("%2F", "/"));
+  document.getElementById("viewer-title").textContent = name;
+  document.getElementById("viewer-body").textContent =
+    res.ok ? await res.text() : "Не удалось открыть файл";
+  overlayEl.classList.add("open");
+}
+
+sendEl.onclick = send;
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+document.getElementById("refresh").onclick = loadFiles;
+document.getElementById("viewer-close").onclick = () => overlayEl.classList.remove("open");
+overlayEl.onclick = (e) => { if (e.target === overlayEl) overlayEl.classList.remove("open"); };
+
+loadFiles();
+inputEl.focus();
+</script>
+</body>
+</html>
