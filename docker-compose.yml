@@ -1,43 +1,11 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-
-  # Одноразовый сервис: скачивает модель эмбеддингов при первом запуске
-  ollama-init:
-    image: ollama/ollama:latest
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["ollama"]
-    command: ["pull", "bge-m3"]
-    restart: "no"
-
   bot:
     build: .
     env_file: .env
     environment:
-      # Переопределяют значения из .env: внутри compose-сети адреса и пути свои
-      - OLLAMA_BASE_URL=http://ollama:11434
+      # Переопределяет значение из .env: внутри контейнера путь к памяти свой
       - OBSIDIAN_VAULT_PATH=/app/bot-memory
     volumes:
       - ./bot-memory:/app/bot-memory
       - ./chroma_db:/app/chroma_db
-    depends_on:
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
     restart: unless-stopped
-
-volumes:
-  ollama_data:

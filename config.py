@@ -16,10 +16,9 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 # Потолок длины ответа для облачных провайдеров (в токенах)
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or 4096)
 
-# Ollama (локальная модель; эмбеддинги для памяти считаются здесь всегда)
+# Ollama (только если LLM_PROVIDER=ollama — для облачных провайдеров не нужен)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
 
 # Облачные провайдеры
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")

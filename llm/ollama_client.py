@@ -5,20 +5,32 @@ ollama | groq | gemini | openrouter | openai | anthropic.
 
 Groq, Gemini, OpenRouter и OpenAI ходят через OpenAI-совместимый API
 (один SDK, разные base_url). Anthropic — через официальный SDK.
-Эмбеддинги для памяти всегда считает локальный Ollama (bge-m3),
+Эмбеддинги для памяти всегда считаются через Gemini API (text-embedding-004),
 независимо от выбранного провайдера ответов.
 """
 import anthropic
+import google.generativeai as _genai
 import ollama
 from openai import OpenAI
 
 import config
 
 
+def gemini_embed(texts: list[str]) -> list[list[float]]:
+    """Эмбеддинги через Gemini text-embedding-004 (бесплатно, мультиязычно)."""
+    if not texts:
+        return []
+    _genai.configure(api_key=config.GEMINI_API_KEY)
+    result = _genai.embed_content(
+        model="models/text-embedding-004",
+        content=texts,
+    )
+    return result["embedding"]
+
+
 class OllamaClient:
-    def __init__(self, base_url: str, model: str, embed_model: str):
+    def __init__(self, base_url: str, model: str):
         self.model = model
-        self.embed_model = embed_model
         self._client = ollama.Client(host=base_url)
 
     def is_available(self) -> bool:
@@ -41,12 +53,6 @@ class OllamaClient:
         """messages: [{"role": "system"|"user"|"assistant", "content": str}, ...]"""
         response = self._client.chat(model=self.model, messages=messages)
         return response.message.content
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        response = self._client.embed(model=self.embed_model, input=texts)
-        return response.embeddings
 
 
 # OpenAI-совместимые провайдеры: name -> (base_url, api_key, model)
