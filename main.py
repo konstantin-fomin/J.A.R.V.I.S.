@@ -17,6 +17,7 @@ from memory.chroma import ChromaIndex
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from memory.obsidian import ObsidianVault
+from tasks import TaskStore
 from web.server import create_app
 
 logging.basicConfig(
@@ -64,6 +65,7 @@ def main() -> None:
     index = ChromaIndex(config.CHROMA_PERSIST_DIR, gemini_embed)
     memory = MemoryManager(vault, index, config.MAX_MEMORY_RESULTS)
     facts = FactExtractor(llm, memory)
+    tasks_store = TaskStore(config.TASKS_DB_PATH)
 
     logger.info("Синхронизация памяти с %s ...", config.OBSIDIAN_VAULT_PATH)
     changed = memory.sync()
@@ -84,7 +86,7 @@ def main() -> None:
         "Веб-интерфейс: http://%s:%d", config.WEB_HOST, config.WEB_PORT
     )
     uvicorn.run(
-        create_app(memory, llm, facts),
+        create_app(memory, llm, facts, tasks_store),
         host=config.WEB_HOST,
         port=config.WEB_PORT,
         log_level="warning",

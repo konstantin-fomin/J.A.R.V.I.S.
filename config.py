@@ -49,6 +49,9 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID") or 0) or None
 # ChromaDB
 CHROMA_PERSIST_DIR = str(BASE_DIR / "chroma_db")
 
+# Задачи (SQLite, отдельно от памяти)
+TASKS_DB_PATH = Path(os.getenv("TASKS_DB_PATH") or (BASE_DIR / "tasks.db"))
+
 # Память
 MAX_MEMORY_RESULTS = 5       # сколько воспоминаний подгружать
 MAX_HISTORY_MESSAGES = 10    # сколько последних сообщений хранить в контексте

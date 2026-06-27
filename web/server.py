@@ -12,6 +12,7 @@
 """
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -21,6 +22,7 @@ import config
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from tasks import TaskStore
 
 INDEX_HTML = Path(__file__).parent / "index.html"
 
@@ -29,7 +31,25 @@ class ChatRequest(BaseModel):
     message: str
 
 
-def create_app(memory: MemoryManager, llm: LLMClient, facts: FactExtractor) -> FastAPI:
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    due_date: Optional[str] = None    # "2026-06-28"
+    due_time: Optional[str] = None    # "12:00"
+    priority: Optional[str] = "normal"
+    source: Optional[str] = "dashboard"
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None      # todo / done / cancelled
+    priority: Optional[str] = None
+    due_date: Optional[str] = None
+    due_time: Optional[str] = None
+
+
+def create_app(memory: MemoryManager, llm: LLMClient, facts: FactExtractor, tasks: TaskStore) -> FastAPI:
     app = FastAPI(title="J.A.R.V.I.S.", docs_url=None, redoc_url=None)
     history: list[dict] = []
 
@@ -81,5 +101,38 @@ def create_app(memory: MemoryManager, llm: LLMClient, facts: FactExtractor) -> F
         if filename not in memory.list_files():
             raise HTTPException(status_code=404, detail="Файл не найден")
         return PlainTextResponse(memory.vault.read_file(filename))
+
+    @app.get("/api/tasks")
+    def list_tasks(status: Optional[str] = None, due: Optional[str] = None) -> dict:
+        due_date = date.today().isoformat() if due == "today" else due
+        return {"tasks": tasks.list(status=status, due_date=due_date)}
+
+    @app.post("/api/tasks")
+    def create_task(req: TaskCreate) -> dict:
+        if not req.title.strip():
+            raise HTTPException(status_code=400, detail="Пустой title")
+        task = tasks.create(
+            title=req.title.strip(),
+            description=req.description,
+            due_date=req.due_date,
+            due_time=req.due_time,
+            priority=req.priority or "normal",
+            source=req.source or "dashboard",
+        )
+        return {"task": task}
+
+    @app.patch("/api/tasks/{task_id}")
+    def update_task(task_id: int, req: TaskUpdate) -> dict:
+        existing = tasks.get(task_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Задача не найдена")
+        updated = tasks.update(task_id, **req.model_dump(exclude_unset=True))
+        return {"task": updated}
+
+    @app.delete("/api/tasks/{task_id}")
+    def delete_task(task_id: int) -> dict:
+        if not tasks.delete(task_id):
+            raise HTTPException(status_code=404, detail="Задача не найдена")
+        return {"deleted": task_id}
 
     return app
