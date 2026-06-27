@@ -13,4 +13,7 @@ services:
     volumes:
       - ./bot-memory:/app/bot-memory
       - ./chroma_db:/app/chroma_db
+      # SQLite-база задач: одиночный файл, хостовый tasks.db должен существовать
+      # до старта (иначе Docker создаст на его месте каталог)
+      - ./tasks.db:/app/tasks.db
     restart: unless-stopped

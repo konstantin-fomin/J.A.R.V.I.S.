@@ -4,6 +4,9 @@
 # Локальные данные
 chroma_db/
 bot-memory/
+tasks.db
+tasks.db-journal
+tasks.db-wal
 K:/OBSIDIAN/
 
 # Python
