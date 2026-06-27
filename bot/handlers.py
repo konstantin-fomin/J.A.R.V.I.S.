@@ -9,9 +9,11 @@ from telegram.ext import ContextTypes
 
 import config
 from bills import BillStore, current_month
+from intents import IntentRouter, parse_intent
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from tasks import TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,8 @@ TELEGRAM_MAX_LEN = 4096
 START_TEXT = """Привет! Я твой личный ассистент с памятью.
 
 Просто пиши мне — я отвечаю с учётом всего, что знаю о тебе.
+Задачами и платежами можно управлять обычным текстом: «добавь задачу…»,
+«отметь … выполненной», «удали задачу…», «я оплатил…», «какие задачи?».
 Всё общение сохраняется в журнал в Obsidian, а важные факты
 я сам раскладываю по темам в память.
 
@@ -65,6 +69,10 @@ def _allowed(update: Update) -> bool:
 
 # Префикс callback_data для кнопки «оплачено»: "bill_paid:<instance_id>"
 BILL_PAID_PREFIX = "bill_paid:"
+
+# callback_data кнопок Да/Нет под подтверждением intent-действия
+INTENT_YES = "intent_yes"
+INTENT_NO = "intent_no"
 
 
 def format_bills(instances: list[dict], header: str) -> str:
@@ -113,11 +121,14 @@ class Handlers:
         llm: LLMClient,
         facts: FactExtractor,
         bills: BillStore,
+        tasks: TaskStore,
     ):
         self.memory = memory
         self.llm = llm
         self.facts = facts
         self.bills = bills
+        self.tasks = tasks
+        self.router = IntentRouter(tasks, bills)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -235,8 +246,67 @@ class Handlers:
             await update.message.reply_text("Записал в дневник 📓")
             return
 
+        # Сначала пробуем распознать намерение (создать/выполнить/удалить задачу,
+        # отметить платёж и т.п.). Любая ошибка парсинга → intent none → обычный чат.
         await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            intent_data = await asyncio.to_thread(parse_intent, self.llm, text)
+        except Exception:
+            logger.exception("Парсинг намерения упал — уходим в обычный чат")
+            intent_data = {"intent": "none", "confidence": "high"}
 
+        resolution = self.router.resolve(intent_data)
+        if resolution.kind != "chat":
+            await self._handle_resolution(update, context, resolution)
+            return
+
+        # intent none → обычный chat/memory pipeline
+        await self._chat(update, context, text)
+
+    async def _handle_resolution(self, update, context, resolution) -> None:
+        if resolution.kind == "message":
+            await update.message.reply_text(resolution.text)
+            return
+        if resolution.kind == "execute":
+            reply = await asyncio.to_thread(self.router.execute, resolution.action)
+            for part in _split_message(reply):
+                await update.message.reply_text(part)
+            return
+        if resolution.kind == "confirm":
+            context.chat_data["pending_action"] = resolution.action
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Да", callback_data=INTENT_YES),
+                        InlineKeyboardButton("❌ Нет", callback_data=INTENT_NO),
+                    ]
+                ]
+            )
+            await update.message.reply_text(f"Уточню: {resolution.label}", reply_markup=keyboard)
+
+    async def confirm_intent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Callback кнопок Да/Нет под подтверждением intent-действия."""
+        query = update.callback_query
+        if not _allowed(update):
+            await query.answer()
+            return
+        action = context.chat_data.pop("pending_action", None)
+        if action is None:
+            await query.answer("Действие устарело")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                logger.debug("Не смог убрать клавиатуру подтверждения", exc_info=True)
+            return
+        if query.data == INTENT_NO:
+            await query.answer("Отменено")
+            await query.edit_message_text("Отменено ❌")
+            return
+        await query.answer()
+        reply = await asyncio.to_thread(self.router.execute, action)
+        await query.edit_message_text(reply[:TELEGRAM_MAX_LEN])
+
+    async def _chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         history: list[dict] = context.chat_data.setdefault("history", [])
         try:
             memory_context = self.memory.remember(text)

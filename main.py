@@ -78,7 +78,7 @@ def main() -> None:
     )
     bot_thread = threading.Thread(
         target=run_bot_in_thread,
-        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store),
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store),
         daemon=True,
         name="telegram-polling",
     )
