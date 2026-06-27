@@ -276,3 +276,46 @@ def test_calendar_today_returns_empty_on_api_error():
     resp = _client(Broken()).get("/api/calendar/today")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# --- load_calendar: гейт на наличие именно ФАЙЛОВ credentials+token ----------
+
+def _patch_paths(monkeypatch, creds, token, tz="Europe/Moscow"):
+    import config
+
+    monkeypatch.setattr(config, "CALENDAR_CREDENTIALS_PATH", creds)
+    monkeypatch.setattr(config, "CALENDAR_TOKEN_PATH", token)
+    monkeypatch.setattr(config, "CALENDAR_TIMEZONE", tz)
+
+
+def test_load_calendar_none_when_token_missing(tmp_path, monkeypatch):
+    from calendar_client import load_calendar
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text("{}")
+    _patch_paths(monkeypatch, creds, tmp_path / "token.json")  # token нет
+    assert load_calendar() is None
+
+
+def test_load_calendar_none_when_token_is_directory(tmp_path, monkeypatch):
+    # Docker bind-mount несуществующего файла создаёт КАТАЛОГ на его месте —
+    # это не валидный токен, календарь должен остаться «не настроен» (None).
+    from calendar_client import load_calendar
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text("{}")
+    token_dir = tmp_path / "token.json"
+    token_dir.mkdir()
+    _patch_paths(monkeypatch, creds, token_dir)
+    assert load_calendar() is None
+
+
+def test_load_calendar_returns_client_when_both_files_present(tmp_path, monkeypatch):
+    from calendar_client import CalendarClient, load_calendar
+
+    creds = tmp_path / "credentials.json"
+    creds.write_text("{}")
+    token = tmp_path / "token.json"
+    token.write_text("{}")
+    _patch_paths(monkeypatch, creds, token)
+    assert isinstance(load_calendar(), CalendarClient)

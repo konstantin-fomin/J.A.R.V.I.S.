@@ -2,6 +2,9 @@
 .gitignore
 .env
 .env.example
+# Секреты календаря: в образ не запекаем, отдаём только через volume
+credentials.json
+token.json
 .venv
 chroma_db
 bot-memory

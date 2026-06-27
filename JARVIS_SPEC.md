@@ -554,5 +554,25 @@ API возвращает `[]`, чтобы дашборд не падал без 
    **Desktop app**, скачать `credentials.json`.
 2. На **домашнем компе** (с браузером): положить `credentials.json` рядом с
    `generate_calendar_token.py`, запустить его, пройти согласие — появится `token.json`.
-3. Перенести `token.json` (и `credentials.json`) на VPS рядом с кодом, перезапустить
-   бота. Файлы НЕ коммитить.
+3. Перенести `token.json` (и `credentials.json`) на VPS **в каталог репозитория**
+   (рядом с `docker-compose.yml`/`tasks.db`) → внутри контейнера это `/app/token.json`
+   и `/app/credentials.json`. Файлы НЕ коммитить.
+4. `docker compose up -d --build`.
+
+### Хранение секретов в Docker
+
+`credentials.json`/`token.json` — в `.gitignore` (не коммитим) и в `.dockerignore`
+(не запекаются в образ). На рантайме отдаются только через **bind-mount** в
+`docker-compose.yml` — как `tasks.db`:
+
+```yaml
+- ./credentials.json:/app/credentials.json:ro   # только чтение
+- ./token.json:/app/token.json                  # rw: бот перезаписывает при рефреше
+```
+
+Это важно по двум причинам: (1) обновлённый `token.json` (рефреш access-токена)
+переживает пересборку образа; (2) секреты не попадают в слои образа. Те же грабли с
+одиночными файлами, что у `.db`: хостовые файлы должны существовать **до**
+`docker compose up`, иначе Docker создаст на их месте каталоги (тогда `load_calendar`
+по `is_file()` просто отключит календарь). Не используешь календарь — закомментируй
+эти две строки volume.

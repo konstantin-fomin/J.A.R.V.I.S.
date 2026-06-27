@@ -144,12 +144,15 @@ class CalendarClient:
 
 
 def load_calendar():
-    """CalendarClient, если есть и credentials.json, и token.json, иначе None.
+    """CalendarClient, если есть и credentials.json, и token.json (именно файлы),
+    иначе None.
 
-    None означает «календарь не настроен» — бот работает без него."""
+    None означает «календарь не настроен» — бот работает без него. Проверяем
+    is_file(), а не exists(): bind-mount несуществующего файла Docker создаёт как
+    каталог — такой «токен» невалиден, календарь должен остаться отключённым."""
     import config
 
-    if not config.CALENDAR_CREDENTIALS_PATH.exists() or not config.CALENDAR_TOKEN_PATH.exists():
+    if not config.CALENDAR_CREDENTIALS_PATH.is_file() or not config.CALENDAR_TOKEN_PATH.is_file():
         return None
     return CalendarClient(
         config.CALENDAR_CREDENTIALS_PATH,

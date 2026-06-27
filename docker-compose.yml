@@ -17,4 +17,11 @@ services:
       # существовать до старта (иначе Docker создаст на их месте каталоги)
       - ./tasks.db:/app/tasks.db
       - ./bills.db:/app/bills.db
+      # Google Calendar OAuth. token.json бот перезаписывает при рефреше — поэтому
+      # rw и через volume, чтобы переживал пересборку; credentials.json только читается (ro).
+      # Те же грабли с одиночными файлами: должны существовать на хосте до старта,
+      # иначе Docker создаст каталоги (load_calendar проверяет is_file и тогда просто
+      # отключит календарь). Если календарь не используешь — закомментируй эти две строки.
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json
     restart: unless-stopped
