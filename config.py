@@ -52,6 +52,9 @@ CHROMA_PERSIST_DIR = str(BASE_DIR / "chroma_db")
 # Задачи (SQLite, отдельно от памяти)
 TASKS_DB_PATH = Path(os.getenv("TASKS_DB_PATH") or (BASE_DIR / "tasks.db"))
 
+# Платежи (SQLite, отдельно от памяти и задач)
+BILLS_DB_PATH = Path(os.getenv("BILLS_DB_PATH") or (BASE_DIR / "bills.db"))
+
 # Память
 MAX_MEMORY_RESULTS = 5       # сколько воспоминаний подгружать
 MAX_HISTORY_MESSAGES = 10    # сколько последних сообщений хранить в контексте

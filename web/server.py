@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 import config
+from bills import BillStore, current_month
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -49,7 +50,32 @@ class TaskUpdate(BaseModel):
     due_time: Optional[str] = None
 
 
-def create_app(memory: MemoryManager, llm: LLMClient, facts: FactExtractor, tasks: TaskStore) -> FastAPI:
+class BillTemplateCreate(BaseModel):
+    name: str
+    amount: Optional[float] = None    # nullable — сумма может быть переменной
+    day_of_month: int                 # 1-31
+    category: Optional[str] = None
+
+
+class BillTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    amount: Optional[float] = None
+    day_of_month: Optional[int] = None
+    category: Optional[str] = None
+    active: Optional[bool] = None      # деактивация без удаления истории
+
+
+class BillInstanceUpdate(BaseModel):
+    status: Optional[str] = None       # pending / paid
+
+
+def create_app(
+    memory: MemoryManager,
+    llm: LLMClient,
+    facts: FactExtractor,
+    tasks: TaskStore,
+    bills: BillStore,
+) -> FastAPI:
     app = FastAPI(title="J.A.R.V.I.S.", docs_url=None, redoc_url=None)
     history: list[dict] = []
 
@@ -134,5 +160,47 @@ def create_app(memory: MemoryManager, llm: LLMClient, facts: FactExtractor, task
         if not tasks.delete(task_id):
             raise HTTPException(status_code=404, detail="Задача не найдена")
         return {"deleted": task_id}
+
+    @app.get("/api/bills")
+    def list_bills(month: Optional[str] = None) -> dict:
+        ym = month or current_month()
+        # Лениво создаём начисления месяца при первом обращении в этом месяце
+        bills.ensure_month(ym)
+        return {"month": ym, "bills": bills.list_instances(ym)}
+
+    @app.get("/api/bills/templates")
+    def list_bill_templates() -> dict:
+        return {"templates": bills.list_templates()}
+
+    @app.post("/api/bills/templates")
+    def create_bill_template(req: BillTemplateCreate) -> dict:
+        if not req.name.strip():
+            raise HTTPException(status_code=400, detail="Пустой name")
+        if not 1 <= req.day_of_month <= 31:
+            raise HTTPException(status_code=400, detail="day_of_month должен быть 1-31")
+        template = bills.create_template(
+            name=req.name.strip(),
+            day_of_month=req.day_of_month,
+            amount=req.amount,
+            category=req.category,
+        )
+        return {"template": template}
+
+    @app.patch("/api/bills/templates/{template_id}")
+    def update_bill_template(template_id: int, req: BillTemplateUpdate) -> dict:
+        if not bills.get_template(template_id):
+            raise HTTPException(status_code=404, detail="Шаблон не найден")
+        fields = req.model_dump(exclude_unset=True)
+        if "day_of_month" in fields and not 1 <= fields["day_of_month"] <= 31:
+            raise HTTPException(status_code=400, detail="day_of_month должен быть 1-31")
+        return {"template": bills.update_template(template_id, **fields)}
+
+    @app.patch("/api/bills/{instance_id}")
+    def update_bill_instance(instance_id: int, req: BillInstanceUpdate) -> dict:
+        if not bills.get_instance(instance_id):
+            raise HTTPException(status_code=404, detail="Начисление не найдено")
+        if req.status is not None and req.status not in ("pending", "paid"):
+            raise HTTPException(status_code=400, detail="status должен быть pending или paid")
+        return {"bill": bills.set_status(instance_id, req.status)}
 
     return app

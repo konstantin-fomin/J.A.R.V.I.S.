@@ -7,6 +7,9 @@ bot-memory/
 tasks.db
 tasks.db-journal
 tasks.db-wal
+bills.db
+bills.db-journal
+bills.db-wal
 K:/OBSIDIAN/
 
 # Python

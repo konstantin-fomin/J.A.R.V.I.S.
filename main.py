@@ -16,6 +16,7 @@ from llm.ollama_client import LLMClient, OllamaClient, gemini_embed
 from memory.chroma import ChromaIndex
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from bills import BillStore
 from memory.obsidian import ObsidianVault
 from tasks import TaskStore
 from web.server import create_app
@@ -66,6 +67,7 @@ def main() -> None:
     memory = MemoryManager(vault, index, config.MAX_MEMORY_RESULTS)
     facts = FactExtractor(llm, memory)
     tasks_store = TaskStore(config.TASKS_DB_PATH)
+    bills_store = BillStore(config.BILLS_DB_PATH)
 
     logger.info("Синхронизация памяти с %s ...", config.OBSIDIAN_VAULT_PATH)
     changed = memory.sync()
@@ -76,7 +78,7 @@ def main() -> None:
     )
     bot_thread = threading.Thread(
         target=run_bot_in_thread,
-        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts),
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store),
         daemon=True,
         name="telegram-polling",
     )
@@ -86,7 +88,7 @@ def main() -> None:
         "Веб-интерфейс: http://%s:%d", config.WEB_HOST, config.WEB_PORT
     )
     uvicorn.run(
-        create_app(memory, llm, facts, tasks_store),
+        create_app(memory, llm, facts, tasks_store, bills_store),
         host=config.WEB_HOST,
         port=config.WEB_PORT,
         log_level="warning",
