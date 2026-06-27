@@ -1,7 +1,8 @@
 """Telegram polling бот."""
 import asyncio
 import logging
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram.ext import (
     Application,
@@ -20,6 +21,7 @@ from bot.handlers import (
     bills_markup,
     format_bills,
 )
+from calendar_client import events_to_remind
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -29,6 +31,34 @@ logger = logging.getLogger(__name__)
 
 # Время ежедневной проверки платежей (по времени сервера/UTC).
 BILLS_REMINDER_TIME = time(hour=9, minute=0)
+
+
+async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Периодически: напомнить о встречах, начинающихся в ближайшие N минут.
+
+    Уже разосланные напоминания хранятся в job.data['reminded'], чтобы не
+    дублировать между запусками (множество сбрасывается на рестарте бота)."""
+    data = context.job.data
+    calendar = data["calendar"]
+    reminded: set = data["reminded"]
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        return
+    tz = ZoneInfo(config.CALENDAR_TIMEZONE)
+    now = datetime.now(tz)
+    horizon = now + timedelta(minutes=config.CALENDAR_REMINDER_LEAD_MINUTES)
+    try:
+        events = calendar.list_events(now, horizon)
+    except Exception:
+        logger.exception("Не удалось получить события для напоминания")
+        return
+    for ev in events_to_remind(events, now, horizon, reminded):
+        reminded.add(ev["id"])
+        minutes = max(0, round((ev["start"] - now).total_seconds() / 60))
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔔 Через {minutes} мин встреча: «{ev['title']}» в {ev['start'].strftime('%H:%M')}",
+        )
 
 
 async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -57,8 +87,9 @@ def build_application(
     facts: FactExtractor,
     bills: BillStore,
     tasks: TaskStore,
+    calendar=None,
 ) -> Application:
-    handlers = Handlers(memory, llm, facts, bills, tasks)
+    handlers = Handlers(memory, llm, facts, bills, tasks, calendar)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -76,9 +107,18 @@ def build_application(
         app.job_queue.run_daily(
             remind_bills, time=BILLS_REMINDER_TIME, data=bills, name="remind_bills"
         )
+        # Напоминания о встречах — только если календарь настроен
+        if calendar is not None:
+            app.job_queue.run_repeating(
+                remind_events,
+                interval=config.CALENDAR_REMINDER_INTERVAL,
+                first=10,
+                data={"calendar": calendar, "reminded": set()},
+                name="remind_events",
+            )
     else:
         logger.warning(
-            "JobQueue недоступен (нет APScheduler) — напоминания о платежах отключены. "
+            "JobQueue недоступен (нет APScheduler) — напоминания отключены. "
             "Установи python-telegram-bot[job-queue]."
         )
     return app
@@ -91,9 +131,12 @@ def run_bot(
     facts: FactExtractor,
     bills: BillStore,
     tasks: TaskStore,
+    calendar=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
-    build_application(token, memory, llm, facts, bills, tasks).run_polling(drop_pending_updates=True)
+    build_application(token, memory, llm, facts, bills, tasks, calendar).run_polling(
+        drop_pending_updates=True
+    )
 
 
 def run_bot_in_thread(
@@ -103,11 +146,12 @@ def run_bot_in_thread(
     facts: FactExtractor,
     bills: BillStore,
     tasks: TaskStore,
+    calendar=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    build_application(token, memory, llm, facts, bills, tasks).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

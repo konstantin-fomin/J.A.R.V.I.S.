@@ -10,9 +10,11 @@
 Эндпоинты обычные def — FastAPI выполняет их в thread pool, поэтому
 блокирующие вызовы LLM не вешают сервер.
 """
-from datetime import date
+import logging
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -25,7 +27,20 @@ from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from tasks import TaskStore
 
+logger = logging.getLogger(__name__)
+
 INDEX_HTML = Path(__file__).parent / "index.html"
+
+
+def _serialize_event(e: dict) -> dict:
+    """Событие календаря → JSON-safe dict (datetime → ISO-строка)."""
+    return {
+        "id": e["id"],
+        "title": e["title"],
+        "start": e["start"].isoformat(),
+        "end": e["end"].isoformat(),
+        "html_link": e.get("html_link", ""),
+    }
 
 
 class ChatRequest(BaseModel):
@@ -75,6 +90,7 @@ def create_app(
     facts: FactExtractor,
     tasks: TaskStore,
     bills: BillStore,
+    calendar=None,
 ) -> FastAPI:
     app = FastAPI(title="J.A.R.V.I.S.", docs_url=None, redoc_url=None)
     history: list[dict] = []
@@ -202,5 +218,21 @@ def create_app(
         if req.status is not None and req.status not in ("pending", "paid"):
             raise HTTPException(status_code=400, detail="status должен быть pending или paid")
         return {"bill": bills.set_status(instance_id, req.status)}
+
+    @app.get("/api/calendar/today")
+    def calendar_today() -> list:
+        # Календарь опционален: без настроенного token.json или при ошибке API
+        # возвращаем [], чтобы дашборд не падал. См. JARVIS_SPEC.md §9.
+        if calendar is None:
+            return []
+        try:
+            tz = ZoneInfo(config.CALENDAR_TIMEZONE)
+            now = datetime.now(tz)
+            start = datetime.combine(now.date(), time.min, tzinfo=tz)
+            end = datetime.combine(now.date(), time.max, tzinfo=tz)
+            return [_serialize_event(e) for e in calendar.list_events(start, end)]
+        except Exception:
+            logger.exception("Не удалось получить события календаря")
+            return []
 
     return app

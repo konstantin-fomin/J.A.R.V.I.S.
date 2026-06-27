@@ -12,6 +12,7 @@ import uvicorn
 
 import config
 from bot.telegram_bot import run_bot_in_thread
+from calendar_client import load_calendar
 from llm.ollama_client import LLMClient, OllamaClient, gemini_embed
 from memory.chroma import ChromaIndex
 from memory.facts import FactExtractor
@@ -68,6 +69,9 @@ def main() -> None:
     facts = FactExtractor(llm, memory)
     tasks_store = TaskStore(config.TASKS_DB_PATH)
     bills_store = BillStore(config.BILLS_DB_PATH)
+    # Календарь опционален: None, если нет credentials.json/token.json
+    calendar = load_calendar()
+    logger.info("Google Calendar: %s", "подключён" if calendar else "не настроен (token.json нет)")
 
     logger.info("Синхронизация памяти с %s ...", config.OBSIDIAN_VAULT_PATH)
     changed = memory.sync()
@@ -78,7 +82,7 @@ def main() -> None:
     )
     bot_thread = threading.Thread(
         target=run_bot_in_thread,
-        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store),
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store, calendar),
         daemon=True,
         name="telegram-polling",
     )
@@ -88,7 +92,7 @@ def main() -> None:
         "Веб-интерфейс: http://%s:%d", config.WEB_HOST, config.WEB_PORT
     )
     uvicorn.run(
-        create_app(memory, llm, facts, tasks_store, bills_store),
+        create_app(memory, llm, facts, tasks_store, bills_store, calendar),
         host=config.WEB_HOST,
         port=config.WEB_PORT,
         log_level="warning",

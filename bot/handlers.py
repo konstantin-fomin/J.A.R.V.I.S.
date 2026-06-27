@@ -123,13 +123,15 @@ class Handlers:
         facts: FactExtractor,
         bills: BillStore,
         tasks: TaskStore,
+        calendar=None,
     ):
         self.memory = memory
         self.llm = llm
         self.facts = facts
         self.bills = bills
         self.tasks = tasks
-        self.router = IntentRouter(tasks, bills)
+        self.calendar = calendar
+        self.router = IntentRouter(tasks, bills, calendar)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):

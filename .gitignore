@@ -1,5 +1,7 @@
 # Секреты
 .env
+credentials.json
+token.json
 
 # Локальные данные
 chroma_db/

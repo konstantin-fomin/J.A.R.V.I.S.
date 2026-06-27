@@ -454,3 +454,105 @@ Gemini получает сообщение + текущую дату и возв
 ### Ненайденная цель
 
 Если по `title_hint`/`name_hint` ничего не нашлось — сказать прямо: «не нашёл задачу похожую на «…»», и **не делать вид, что что-то произошло**. Никаких молчаливых no-op.
+
+---
+
+## 9. Calendar — дизайн
+
+Интеграция с Google Calendar: создание/перенос/удаление/просмотр встреч свободным
+текстом (как tasks/bills), напоминания перед встречей и виджет «сегодня» на дашборде.
+
+### Принцип: календарь опционален
+
+Бот должен работать **без настроенного календаря**. Если `credentials.json`/`token.json`
+не найдены, `load_calendar()` возвращает `None`, и:
+- intent календаря → ответ «Календарь не подключён»;
+- эндпоинт `/api/calendar/today` → `[]` (обёрнут в try/except);
+- job напоминаний просто не регистрируется.
+
+Никаких падений на старте из-за отсутствия календаря.
+
+### OAuth: credentials.json + token.json
+
+Google OAuth (Desktop App). Поток требует браузера, а VPS headless — поэтому
+авторизация **разнесена**:
+
+- `credentials.json` — OAuth client (скачивается из Google Cloud Console), кладётся
+  рядом с кодом. **Не коммитим** (в .gitignore).
+- `generate_calendar_token.py` — **standalone**-скрипт, НЕ часть бота. Запускается
+  **на домашнем компе с браузером**: `InstalledAppFlow.run_local_server()` открывает
+  браузер, после согласия сохраняет `token.json`. Файл переносится на VPS.
+- `token.json` — рефреш-токен. **Не коммитим**. Бот молча обновляет access-токен
+  по нему через `google.auth.transport.requests.Request`.
+
+Scope: `https://www.googleapis.com/auth/calendar` (чтение и запись).
+
+### `calendar_client.py` — обёртка над API
+
+`google-api-python-client` + `google-auth-oauthlib`. Google-импорты ленивые (внутри
+методов), чтобы модуль грузился даже без установленных либ/токена — это держит
+`select_conflicts` тестируемым без сети.
+
+```
+load_calendar() -> CalendarClient | None    # None, если нет credentials/token
+class CalendarClient:
+    list_events(start, end) -> list[dict]    # [{id, title, start: dt, end: dt, html_link}]
+    create_event(title, start, end) -> dict
+    update_event(event_id, **fields) -> dict
+    delete_event(event_id) -> None
+    find_conflicts(start, end, ignore_event_id=None) -> list[dict]
+```
+
+`select_conflicts(events, start, end, ignore_id)` — чистая функция пересечения
+(`a.start < end and start < a.end`), на ней же стоит `find_conflicts`.
+
+Время — timezone-aware. TZ берётся из `CALENDAR_TIMEZONE` (по умолчанию
+`Europe/Moscow`); встречи создаются и сравниваются в ней.
+
+### Intents календаря
+
+Новые intent в парсере и `IntentRouter`: `create_event`, `move_event`,
+`delete_event`, `query_events`. Поля (переиспользуем `title`/`title_hint`/`filter`,
+добавляем `date`/`start_time`/`end_time`):
+
+| intent | поля | действие |
+|---|---|---|
+| `create_event` | `title`, `date`, `start_time`, `end_time?` | создать (end по умолчанию +1ч) |
+| `move_event` | `title_hint`, `date`, `start_time` | найти встречу, перенести, длительность сохранить |
+| `delete_event` | `title_hint` | найти и удалить |
+| `query_events` | `filter` (`today`/`week`/null) | показать встречи диапазона |
+
+### Подтверждения: строже, чем у tasks/bills
+
+**ВСЕ изменения календаря идут через подтверждение Да/Нет** — не только delete, а
+также create и move. Встречи имеют последствия (приглашённые, занятое время), поэтому
+порог осторожности выше, чем у задач. `query_events` — read-only, выполняется сразу.
+
+**Проверка конфликтов:** перед подтверждением create/move вызывается
+`find_conflicts(start, end)` (для move — с `ignore_event_id` переносимой встречи).
+Если есть пересечение — в текст подтверждения добавляется предупреждение
+«⚠️ Пересекается с: «…» (ЧЧ:ММ–ЧЧ:ММ)». Решение остаётся за пользователем: бот
+не блокирует, а предупреждает.
+
+### Напоминания перед встречей
+
+Через тот же `JobQueue`, что и у bills, но `run_repeating` (каждые
+`CALENDAR_REMINDER_INTERVAL`, по умолчанию 5 мин): job смотрит события в ближайшие
+`CALENDAR_REMINDER_LEAD_MINUTES` (по умолчанию 15) и шлёт напоминание. Уже
+напомненные `event_id` держатся в in-memory множестве в `job.data`, чтобы не
+дублировать (сбрасывается на рестарте — допустимо).
+
+### Web
+
+`GET /api/calendar/today` — события на сегодня для виджета дашборда. Вызов
+`calendar_client` обёрнут в try/except; при отсутствии календаря или любой ошибке
+API возвращает `[]`, чтобы дашборд не падал без настроенного календаря.
+
+### Что нужно сделать руками (один раз)
+
+1. В Google Cloud Console включить Google Calendar API, создать OAuth client типа
+   **Desktop app**, скачать `credentials.json`.
+2. На **домашнем компе** (с браузером): положить `credentials.json` рядом с
+   `generate_calendar_token.py`, запустить его, пройти согласие — появится `token.json`.
+3. Перенести `token.json` (и `credentials.json`) на VPS рядом с кодом, перезапустить
+   бота. Файлы НЕ коммитить.

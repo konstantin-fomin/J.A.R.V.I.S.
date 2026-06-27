@@ -55,6 +55,18 @@ TASKS_DB_PATH = Path(os.getenv("TASKS_DB_PATH") or (BASE_DIR / "tasks.db"))
 # Платежи (SQLite, отдельно от памяти и задач)
 BILLS_DB_PATH = Path(os.getenv("BILLS_DB_PATH") or (BASE_DIR / "bills.db"))
 
+# Google Calendar (опционально). Бот работает и без настроенного календаря:
+# нет credentials/token → load_calendar() возвращает None, фичи просто отключены.
+# token.json генерируется отдельным скриптом generate_calendar_token.py на машине
+# с браузером (см. JARVIS_SPEC.md §9) — не на этом headless VPS.
+CALENDAR_CREDENTIALS_PATH = Path(os.getenv("CALENDAR_CREDENTIALS_PATH") or (BASE_DIR / "credentials.json"))
+CALENDAR_TOKEN_PATH = Path(os.getenv("CALENDAR_TOKEN_PATH") or (BASE_DIR / "token.json"))
+# Таймзона встреч: в ней создаются и сравниваются события
+CALENDAR_TIMEZONE = os.getenv("CALENDAR_TIMEZONE", "Europe/Moscow")
+# За сколько минут до встречи напоминать и как часто проверять календарь (секунды)
+CALENDAR_REMINDER_LEAD_MINUTES = int(os.getenv("CALENDAR_REMINDER_LEAD_MINUTES") or 15)
+CALENDAR_REMINDER_INTERVAL = int(os.getenv("CALENDAR_REMINDER_INTERVAL") or 300)
+
 # Память
 MAX_MEMORY_RESULTS = 5       # сколько воспоминаний подгружать
 MAX_HISTORY_MESSAGES = 10    # сколько последних сообщений хранить в контексте
