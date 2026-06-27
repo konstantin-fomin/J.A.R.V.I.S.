@@ -14,6 +14,7 @@ from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from tasks import TaskStore
+from voice import VoiceError, transcribe_voice
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,48 @@ class Handlers:
             await update.message.reply_text("Записал в дневник 📓")
             return
 
+        await self._process_text(update, context, text)
+
+    async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Голосовое: скачать OGG → ffmpeg → WAV → Gemini-транскрипция → общий pipeline.
+
+        Распознанный текст уходит в тот же _process_text, что и обычные сообщения,
+        поэтому намерения (create_task/mark_bill_paid/…) работают и голосом."""
+        if not _allowed(update):
+            return
+        voice = update.message.voice or update.message.audio
+        if voice is None:
+            return
+
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            tg_file = await context.bot.get_file(voice.file_id)
+            ogg_bytes = bytes(await tg_file.download_as_bytearray())
+            text = await asyncio.to_thread(transcribe_voice, ogg_bytes)
+        except VoiceError:
+            logger.exception("Не удалось обработать голосовое")
+            await update.message.reply_text(
+                "Не смог распознать голосовое 😔 Попробуй ещё раз или напиши текстом."
+            )
+            return
+        except Exception:
+            logger.exception("Сбой при скачивании/обработке голосового")
+            await update.message.reply_text(
+                "Что-то пошло не так с голосовым 😔 Напиши, пожалуйста, текстом."
+            )
+            return
+
+        # Транскрипция неуверенная/звук непонятен — честно просим повторить текстом
+        if not text:
+            await update.message.reply_text(
+                "Не разобрал, что в голосовом 🎧 Повтори, пожалуйста, текстом."
+            )
+            return
+
+        await self._process_text(update, context, text)
+
+    async def _process_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+        """Общий путь для текста и расшифрованного голоса: намерение → действие/чат."""
         # Сначала пробуем распознать намерение (создать/выполнить/удалить задачу,
         # отметить платёж и т.п.). Любая ошибка парсинга → intent none → обычный чат.
         await update.message.chat.send_action(ChatAction.TYPING)
