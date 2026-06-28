@@ -78,7 +78,7 @@ class BillStore:
         amount: Optional[float] = None,
         category: Optional[str] = None,
     ) -> dict:
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO bill_templates "
@@ -111,7 +111,7 @@ class BillStore:
             return self.get_template(template_id)
         if "active" in fields:
             fields["active"] = 1 if fields["active"] else 0
-        fields["updated_at"] = datetime.datetime.utcnow().isoformat()
+        fields["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         with self._connect() as conn:
             conn.execute(
@@ -128,7 +128,7 @@ class BillStore:
         Идемпотентно: UNIQUE(template_id, year_month) + INSERT OR IGNORE.
         Возвращает число реально созданных начислений.
         """
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         created = 0
         with self._connect() as conn:
             templates = conn.execute(
@@ -181,7 +181,7 @@ class BillStore:
     def set_status(self, instance_id: int, status: Optional[str]) -> Optional[dict]:
         if status is None:
             return self.get_instance(instance_id)
-        paid_at = datetime.datetime.utcnow().isoformat() if status == "paid" else None
+        paid_at = datetime.datetime.now(datetime.timezone.utc).isoformat() if status == "paid" else None
         with self._connect() as conn:
             conn.execute(
                 "UPDATE bill_instances SET status = ?, paid_at = ? WHERE id = ?",

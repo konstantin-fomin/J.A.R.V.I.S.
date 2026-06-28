@@ -46,7 +46,7 @@ class TaskStore:
         priority: str = "normal",
         source: str = "telegram",
     ) -> dict:
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO tasks "
@@ -80,7 +80,7 @@ class TaskStore:
         fields = {k: v for k, v in fields.items() if v is not None}
         if not fields:
             return self.get(task_id)
-        fields["updated_at"] = datetime.datetime.utcnow().isoformat()
+        fields["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         with self._connect() as conn:
             conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", (*fields.values(), task_id))

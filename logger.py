@@ -65,7 +65,7 @@ class ActionLog:
         raw_message: Optional[str] = None,
     ) -> dict:
         """Записывает совершённую мутацию (status='active') и возвращает запись."""
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO action_log "
