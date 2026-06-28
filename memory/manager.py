@@ -24,6 +24,19 @@ class MemoryManager:
             return "(память пока пуста)"
         return "\n\n".join(f"[{file}]\n{text}" for text, file in results)
 
+    def relevant_notes(self, query: str, k: int = 3, max_distance: float = 0.6) -> list[tuple[str, str]]:
+        """Top-k релевантных кусков памяти, отфильтрованных по порогу косинусной
+        дистанции (меньше = ближе). Возвращает [(текст, файл), ...] — может быть
+        пусто, если ничего достаточно релевантного нет.
+
+        В отличие от remember() (обычный chat-pipeline берёт top-N без отсева),
+        здесь применяется порог: нерелевантные совпадения не подмешиваются.
+        Порог задаётся вызывающим (на VPS — из config.MEMORY_RELEVANCE_MAX_DISTANCE);
+        0.6 — дефолт-fallback.
+        """
+        scored = self.index.search_scored(query, k)
+        return [(text, file) for text, file, dist in scored if dist <= max_distance]
+
     def log_message(self, author: str, text: str) -> None:
         """Записывает сообщение в журнал и обновляет индекс."""
         rel_path = self.vault.append_journal(author, text)

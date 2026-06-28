@@ -119,8 +119,12 @@ class ChromaIndex:
 
     # --- поиск ---
 
-    def search(self, query: str, n_results: int) -> list[tuple[str, str]]:
-        """Топ-N похожих кусков памяти. Возвращает [(текст, файл), ...]."""
+    def search_scored(self, query: str, n_results: int) -> list[tuple[str, str, float]]:
+        """Топ-N похожих кусков с косинусной дистанцией (меньше = ближе).
+
+        Возвращает [(текст, файл, distance), ...]. Дистанция нужна для порога
+        релевантности (pre-meeting bundle), чтобы отсеивать нерелевантные совпадения.
+        """
         if self._collection.count() == 0:
             return []
         result = self._collection.query(
@@ -129,4 +133,9 @@ class ChromaIndex:
         )
         docs = result["documents"][0]
         files = [m["file"] for m in result["metadatas"][0]]
-        return list(zip(docs, files))
+        dists = result["distances"][0]
+        return list(zip(docs, files, dists))
+
+    def search(self, query: str, n_results: int) -> list[tuple[str, str]]:
+        """Топ-N похожих кусков памяти. Возвращает [(текст, файл), ...]."""
+        return [(text, file) for text, file, _ in self.search_scored(query, n_results)]

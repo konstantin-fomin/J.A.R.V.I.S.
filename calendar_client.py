@@ -102,6 +102,7 @@ class CalendarClient:
                 {
                     "id": item["id"],
                     "title": item.get("summary", "(без названия)"),
+                    "description": item.get("description", ""),
                     "start": _parse_google_dt(item["start"], self._tz),
                     "end": _parse_google_dt(item["end"], self._tz),
                     "html_link": item.get("htmlLink", ""),

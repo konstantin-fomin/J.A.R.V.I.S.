@@ -33,6 +33,40 @@ logger = logging.getLogger(__name__)
 # Время ежедневной проверки платежей (по времени сервера/UTC).
 BILLS_REMINDER_TIME = time(hour=9, minute=0)
 
+# Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
+PREMEETING_SNIPPET_MAX = 120
+
+
+def _snippet(text: str) -> str:
+    """Однострочный короткий фрагмент заметки для перечисления под напоминанием."""
+    flat = " ".join(text.split())
+    if len(flat) <= PREMEETING_SNIPPET_MAX:
+        return flat
+    return flat[: PREMEETING_SNIPPET_MAX - 1].rstrip() + "…"
+
+
+def build_reminder_text(event: dict, minutes: int, memory=None,
+                        notes_count: int = 3, max_distance: float = 0.6) -> str:
+    """Текст напоминания о встрече + (опционально) секция «Из твоих заметок».
+
+    Семантический поиск идёт по тому же MemoryManager, что и обычный chat, по
+    названию встречи и описанию (если есть). Релевантные совпадения (top-N в
+    пределах порога) добавляются секцией. Нет релевантных — секции нет,
+    пустой блок не показываем и нерелевантное не натягиваем."""
+    base = (f"🔔 Через {minutes} мин встреча: «{event['title']}» "
+            f"в {event['start'].strftime('%H:%M')}")
+    if memory is None:
+        return base
+    query = event["title"]
+    if event.get("description"):
+        query += " " + event["description"]
+    notes = memory.relevant_notes(query, notes_count, max_distance)
+    if not notes:
+        return base
+    lines = [base, "", "📝 Из твоих заметок:"]
+    lines += [f"• {_snippet(text)}" for text, _file in notes]
+    return "\n".join(lines)
+
 
 async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Периодически: напомнить о встречах, начинающихся в ближайшие N минут.
@@ -42,6 +76,7 @@ async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data
     calendar = data["calendar"]
     reminded: set = data["reminded"]
+    memory = data.get("memory")
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
         return
@@ -56,10 +91,18 @@ async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
     for ev in events_to_remind(events, now, horizon, reminded):
         reminded.add(ev["id"])
         minutes = max(0, round((ev["start"] - now).total_seconds() / 60))
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🔔 Через {minutes} мин встреча: «{ev['title']}» в {ev['start'].strftime('%H:%M')}",
-        )
+        try:
+            text = build_reminder_text(
+                ev, minutes, memory,
+                notes_count=config.PREMEETING_NOTES_COUNT,
+                max_distance=config.MEMORY_RELEVANCE_MAX_DISTANCE,
+            )
+        except Exception:
+            # поиск по памяти не должен ломать само напоминание
+            logger.exception("Не удалось собрать заметки к встрече — шлю без них")
+            text = (f"🔔 Через {minutes} мин встреча: «{ev['title']}» "
+                    f"в {ev['start'].strftime('%H:%M')}")
+        await context.bot.send_message(chat_id=chat_id, text=text)
 
 
 async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -118,7 +161,7 @@ def build_application(
                 remind_events,
                 interval=config.CALENDAR_REMINDER_INTERVAL,
                 first=10,
-                data={"calendar": calendar, "reminded": set()},
+                data={"calendar": calendar, "reminded": set(), "memory": memory},
                 name="remind_events",
             )
     else:

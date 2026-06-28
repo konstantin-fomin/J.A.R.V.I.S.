@@ -77,6 +77,12 @@ CALENDAR_REMINDER_INTERVAL = int(os.getenv("CALENDAR_REMINDER_INTERVAL") or 300)
 MAX_MEMORY_RESULTS = 5       # сколько воспоминаний подгружать
 MAX_HISTORY_MESSAGES = 10    # сколько последних сообщений хранить в контексте
 
+# Pre-meeting context bundle: порог релевантности (косинусная дистанция, меньше =
+# ближе) и сколько заметок прикладывать к напоминанию о встрече. Порог отсекает
+# нерелевантные совпадения, чтобы не показывать пустую/натянутую секцию.
+MEMORY_RELEVANCE_MAX_DISTANCE = float(os.getenv("MEMORY_RELEVANCE_MAX_DISTANCE") or 0.6)
+PREMEETING_NOTES_COUNT = int(os.getenv("PREMEETING_NOTES_COUNT") or 3)
+
 SYSTEM_PROMPT = """Ты — личный AI-ассистент. Говоришь только на русском языке.
 Ты помнишь пользователя и его жизнь благодаря записям в памяти.
 Отвечай как умный, дружелюбный помощник который хорошо знает пользователя.
