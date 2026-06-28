@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
@@ -30,6 +31,9 @@ from tasks import TaskStore
 logger = logging.getLogger(__name__)
 
 INDEX_HTML = Path(__file__).parent / "index.html"
+# Статический дашборд раздаётся тем же приложением. Путь абсолютный (от корня
+# репо), а не относительный "dashboard", — чтобы не зависеть от CWD процесса.
+DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 
 
 def _serialize_event(e: dict) -> dict:
@@ -234,5 +238,10 @@ def create_app(
         except Exception:
             logger.exception("Не удалось получить события календаря")
             return []
+
+    # Статический дашборд: /dashboard/ → dashboard/index.html (html=True). Монтируем
+    # последним, чтобы не перехватывать /api/* и прочие маршруты выше. Реальный
+    # контент кладётся в dashboard/ (bind-mount в docker-compose — правки без пересборки).
+    app.mount("/dashboard", StaticFiles(directory=DASHBOARD_DIR, html=True), name="dashboard")
 
     return app

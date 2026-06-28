@@ -13,6 +13,8 @@ services:
     volumes:
       - ./bot-memory:/app/bot-memory
       - ./chroma_db:/app/chroma_db
+      # Статический дашборд: правки index.html/ассетов подхватываются без пересборки образа
+      - ./dashboard:/app/dashboard
       # SQLite-базы задач, платежей, журнала действий, инбокса, лога подсказок,
       # контактов и read-it-later: одиночные файлы, хостовые .db должны существовать
       # до старта (иначе Docker создаст на их месте каталоги). Перед `docker compose up`:
