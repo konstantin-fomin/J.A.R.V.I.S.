@@ -43,7 +43,55 @@ INTENTS = {
     "mark_read",
     "query_weekly_review",
     "undo_last",
+    "edit_last",
     "none",
+}
+
+# Декларативная политика подтверждений (§17): intent → уровень риска.
+#   safe      — выполнить сразу всегда (read-only query_* и save_link);
+#   medium    — выполнить сразу, если confidence != "low", иначе переспросить;
+#   dangerous — всегда подтверждение Да/Нет, независимо от уверенности.
+# Роутер не разбрасывает проверки «if intent == delete_*», а смотрит сюда
+# (см. _gate). undo_last/edit_last сюда не входят — у них свой путь.
+RISK_LEVELS = {
+    "create_task": "medium",
+    "complete_task": "medium",
+    "delete_task": "dangerous",
+    "query_tasks": "medium",
+    "mark_bill_paid": "medium",
+    "query_bills": "medium",
+    "create_event": "dangerous",
+    "move_event": "dangerous",
+    "delete_event": "dangerous",
+    "query_events": "safe",
+    "query_by_project": "safe",
+    "capture": "medium",
+    "create_contact": "medium",
+    "update_contact": "medium",
+    "query_contacts": "safe",
+    "delete_contact": "dangerous",
+    "save_link": "safe",
+    "query_reads": "safe",
+    "mark_read": "medium",
+    "query_weekly_review": "safe",
+}
+
+# edit_last (§17): какие поля какой сущности можно править у последнего действия и
+# как. entity_type → field (как его называет Gemini) → (колонка в сторе, режим).
+# режим "set" — заменить значение, "append" — дописать к существующему тексту.
+_EDIT_LAST_FIELDS = {
+    "task": {
+        "title": ("title", "set"),
+        "priority": ("priority", "set"),
+        "due_date": ("due_date", "set"),
+        "due_time": ("due_time", "set"),
+    },
+    "contact": {
+        "name": ("name", "set"),
+        "birthday": ("birthday", "set"),
+        "notes": ("notes", "append"),
+        "note": ("notes", "append"),
+    },
 }
 
 # Окно (дней) для запроса «у кого скоро ДР» — шире, чем у ежедневного напоминания
@@ -56,6 +104,7 @@ CONTACT_QUERY_BIRTHDAY_DAYS = 30
 _LOGGED = {
     "create_task": ("task", "create"),
     "complete_task": ("task", "update"),
+    "edit_task": ("task", "update"),
     "delete_task": ("task", "delete"),
     "mark_bill_paid": ("bill", "mark_paid"),
     "create_event": ("calendar_event", "create"),
@@ -95,6 +144,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
 - query_weekly_review — сводка/итоги за неделю («сводка за неделю», «что у меня было на этой неделе», «подведи итоги недели»). Полей нет.
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
+- edit_last — поправить ОДНО поле у последнего действия, не повторяя его («не завтра, а в пятницу», «сделай приоритет высоким», «переименуй в …», «добавь к прошлой заметке: …»). Поля: field, value. field — что меняем: "title" (название), "priority" ("low"|"normal"|"high"), "due_date" ("ГГГГ-ММ-ДД"), "due_time" ("ЧЧ:ММ"), "name" (имя контакта), "birthday" ("ГГГГ-ММ-ДД"), "note" (дописать к заметке контакта). value — новое значение (даты/время — в абсолютном виде, относительно «сегодня»).
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
 Правила:
@@ -109,7 +159,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -253,6 +303,9 @@ class IntentRouter:
         if intent == "undo_last":
             return self._resolve_undo()
 
+        if intent == "edit_last":
+            return self._resolve_edit_last(data)
+
         if intent == "create_task":
             title = str(data.get("title") or "").strip()
             if not title:
@@ -261,8 +314,8 @@ class IntentRouter:
             for key in ("due_date", "due_time", "project"):
                 if data.get(key):
                     params[key] = data[key]
-            return self._auto_or_confirm(
-                {"type": "create_task", "params": params}, f"создать задачу «{title}»?", low
+            return self._gate(
+                intent, {"type": "create_task", "params": params}, f"создать задачу «{title}»?", low
             )
 
         if intent in ("complete_task", "delete_task"):
@@ -276,16 +329,18 @@ class IntentRouter:
                 return Resolution("message", text=f"Нашёл несколько задач: {titles}. Уточни, какую именно.")
             task = matches[0]
             if intent == "complete_task":
-                return self._auto_or_confirm(
+                return self._gate(
+                    intent,
                     {"type": "complete_task", "task_id": task["id"], "title": task["title"]},
                     f"отметить выполненной «{task['title']}»?",
                     low,
                 )
-            # delete — всегда с подтверждением, независимо от confidence
-            return Resolution(
-                "confirm",
-                action={"type": "delete_task", "task_id": task["id"], "title": task["title"]},
-                label=f"удалить задачу «{task['title']}»?",
+            # delete_task — dangerous: всегда с подтверждением, независимо от confidence
+            return self._gate(
+                intent,
+                {"type": "delete_task", "task_id": task["id"], "title": task["title"]},
+                f"удалить задачу «{task['title']}»?",
+                low,
             )
 
         if intent == "mark_bill_paid":
@@ -299,33 +354,33 @@ class IntentRouter:
                 names = ", ".join(f"«{b['name']}»" for b in matches[:5])
                 return Resolution("message", text=f"Нашёл несколько платежей: {names}. Уточни, какой именно.")
             bill = matches[0]
-            return self._auto_or_confirm(
+            return self._gate(
+                intent,
                 {"type": "mark_bill_paid", "instance_id": bill["id"], "name": bill["name"]},
                 f"отметить платёж «{bill['name']}» оплаченным?",
                 low,
             )
 
         if intent == "query_tasks":
-            return self._auto_or_confirm(
-                {"type": "query_tasks", "filter": data.get("filter")}, "показать задачи?", low
+            return self._gate(
+                intent, {"type": "query_tasks", "filter": data.get("filter")}, "показать задачи?", low
             )
 
         if intent == "query_bills":
-            return self._auto_or_confirm({"type": "query_bills"}, "показать платежи?", low)
+            return self._gate(intent, {"type": "query_bills"}, "показать платежи?", low)
 
         if intent == "query_by_project":
             project = str(data.get("project") or "").strip()
             if not project:
                 return Resolution("chat")  # без темы — обычный разговор
-            # read-only → выполняем сразу, без подтверждения
-            return Resolution("execute", action={"type": "query_by_project", "project": project})
+            return self._gate(intent, {"type": "query_by_project", "project": project}, "", low)
 
         if intent == "capture":
             note = str(data.get("note") or "").strip()
             if not note:
                 return Resolution("chat")  # нечего записывать
-            return self._auto_or_confirm(
-                {"type": "capture", "text": note}, f"записать в инбокс «{note}»?", low
+            return self._gate(
+                intent, {"type": "capture", "text": note}, f"записать в инбокс «{note}»?", low
             )
 
         if intent in ("create_contact", "update_contact", "query_contacts", "delete_contact"):
@@ -339,8 +394,8 @@ class IntentRouter:
             return self._resolve_read(intent, data, low)
 
         if intent == "query_weekly_review":
-            # read-only; расчёт+саммари делает хендлер (у него есть LLM)
-            return Resolution("execute", action={"type": "query_weekly_review"})
+            # read-only (safe); расчёт+саммари делает хендлер (у него есть LLM)
+            return self._gate(intent, {"type": "query_weekly_review"}, "", low)
 
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:
@@ -354,8 +409,12 @@ class IntentRouter:
         return Resolution("chat")
 
     @staticmethod
-    def _auto_or_confirm(action: dict, label: str, low_confidence: bool) -> Resolution:
-        if low_confidence:
+    def _gate(intent: str, action: dict, label: str, low: bool) -> Resolution:
+        """Единый шлюз execute/confirm по таблице рисков RISK_LEVELS (§17):
+        safe → сразу; medium → сразу, если confidence != low; dangerous → всегда
+        подтверждение. Неизвестный intent трактуем как medium (осторожнее)."""
+        risk = RISK_LEVELS.get(intent, "medium")
+        if risk == "dangerous" or (risk == "medium" and low):
             return Resolution("confirm", action=action, label=label)
         return Resolution("execute", action=action)
 
@@ -376,8 +435,8 @@ class IntentRouter:
                 params["birthday"] = data["birthday"]
             if data.get("note"):
                 params["notes"] = data["note"]
-            return self._auto_or_confirm(
-                {"type": "create_contact", "params": params}, f"добавить контакт «{name}»?", low
+            return self._gate(
+                intent, {"type": "create_contact", "params": params}, f"добавить контакт «{name}»?", low
             )
 
         if intent == "update_contact":
@@ -391,7 +450,8 @@ class IntentRouter:
             if note:  # заметку дописываем к существующей, а не затираем
                 existing = (single.get("notes") or "").strip()
                 fields["notes"] = f"{existing}\n{note}" if existing else note
-            return self._auto_or_confirm(
+            return self._gate(
+                intent,
                 {"type": "update_contact", "contact_id": single["id"],
                  "name": single["name"], "fields": fields},
                 f"обновить контакт «{single['name']}»?", low,
@@ -402,16 +462,16 @@ class IntentRouter:
             single = self._single_contact(self.contacts.find(hint), hint)
             if isinstance(single, Resolution):
                 return single
-            return Resolution(
-                "confirm",
-                action={"type": "delete_contact", "contact_id": single["id"], "name": single["name"]},
-                label=f"удалить контакт «{single['name']}»?",
+            return self._gate(
+                intent,
+                {"type": "delete_contact", "contact_id": single["id"], "name": single["name"]},
+                f"удалить контакт «{single['name']}»?", low,
             )
 
         if intent == "query_contacts":
-            return Resolution("execute", action={"type": "query_contacts",
-                                                 "filter": data.get("filter"),
-                                                 "name": data.get("name")})
+            return self._gate(intent, {"type": "query_contacts",
+                                       "filter": data.get("filter"),
+                                       "name": data.get("name")}, "", low)
         return Resolution("chat")
 
     @staticmethod
@@ -436,6 +496,10 @@ class IntentRouter:
         if kind == "update_contact":
             after = self.contacts.update(action["contact_id"], **action["fields"])
             return f"✅ Обновил контакт «{action['name']}»", str(action["contact_id"]), after, True
+        if kind == "edit_contact":  # edit_last: правка поля последнего контакта (логируется как update)
+            after = self.contacts.update(action["contact_id"], **action["fields"])
+            return f"✏️ Изменил контакт «{(after or {}).get('name', action['name'])}»", \
+                str(action["contact_id"]), after, True
         if kind == "restore_contact":  # реверс undo: вернуть прежние поля контакта
             after = self.contacts.update(action["contact_id"], **action["fields"])
             return f"↩️ Вернул контакт «{action['name']}»", str(action["contact_id"]), after, True
@@ -495,10 +559,10 @@ class IntentRouter:
             if not url:
                 return Resolution("chat")  # нет ссылки — обычный разговор
             # title/summary дотянет хендлер (там есть LLM и сеть), здесь только url
-            return Resolution("execute", action={"type": "save_link", "params": {"url": url}})
+            return self._gate(intent, {"type": "save_link", "params": {"url": url}}, "", low)
 
         if intent == "query_reads":
-            return Resolution("execute", action={"type": "query_reads"})
+            return self._gate(intent, {"type": "query_reads"}, "", low)
 
         if intent == "mark_read":
             hint = (data.get("title_hint") or data.get("title") or "").strip().lower()
@@ -510,7 +574,8 @@ class IntentRouter:
                 heads = ", ".join(f"«{r['title'] or r['url']}»" for r in matches[:5])
                 return Resolution("message", text=f"Нашёл несколько ссылок: {heads}. Уточни, какую.")
             r = matches[0]
-            return self._auto_or_confirm(
+            return self._gate(
+                intent,
                 {"type": "mark_read", "read_id": r["id"], "title": r["title"] or r["url"]},
                 f"отметить прочитанной «{r['title'] or r['url']}»?", low,
             )
@@ -537,6 +602,47 @@ class IntentRouter:
             # изменения календаря всегда подтверждаем кнопками
             return Resolution("confirm", action=reverse, label=self._undo_label(rec))
         return Resolution("execute", action=reverse)
+
+    # --- Правка последнего действия (edit_last, §17) -------------------------
+    # Берём ту же latest_active(), что и undo, и правим ОДНО поле найденной
+    # сущности через обычный update-путь — значит правка логируется как update и
+    # отменяема через undo_last. Неприменимое поле → честное сообщение, не no-op.
+
+    def _resolve_edit_last(self, data: dict) -> Resolution:
+        if self.log is None:
+            return Resolution("message", text="Журнал действий не ведётся — нечего править.")
+        rec = self.log.latest_active()
+        if rec is None:
+            return Resolution("message", text="Нет последнего действия, которое можно изменить.")
+        field = str(data.get("field") or "").strip()
+        value = data.get("value")
+        spec = _EDIT_LAST_FIELDS.get(rec["entity_type"], {}).get(field)
+        if spec is None or value is None or str(value).strip() == "":
+            return Resolution("message", text="К последнему действию это изменение не подходит 🤔")
+        action = self._build_edit(rec, *spec, value)
+        if action is None:  # сущность есть, но править её этим путём нечем
+            return Resolution("message", text="К последнему действию это изменение не подходит 🤔")
+        return Resolution("execute", action=action)
+
+    def _build_edit(self, rec: dict, column: str, mode: str, value) -> dict | None:
+        """Действие-обновление для edit_last: подставляет новое значение поля
+        последней сущности. mode='append' дописывает к текущему тексту (через \\n)."""
+        et, eid = rec["entity_type"], rec["entity_id"]
+        value = str(value).strip()
+        if et == "task":
+            title = (rec.get("after_state") or rec.get("before_state") or {}).get("title", "")
+            return {"type": "edit_task", "task_id": int(eid),
+                    "fields": {column: value}, "title": title}
+        if et == "contact":
+            if self.contacts is None:
+                return None  # контакты отключены — честно не умеем
+            if mode == "append":
+                existing = ((self.contacts.get(int(eid)) or {}).get(column) or "").strip()
+                value = f"{existing}\n{value}" if existing else value
+            name = (rec.get("after_state") or rec.get("before_state") or {}).get("name", "")
+            return {"type": "edit_contact", "contact_id": int(eid),
+                    "fields": {column: value}, "name": name}
+        return None
 
     @staticmethod
     def _build_reverse(rec: dict) -> dict | None:
@@ -623,8 +729,10 @@ class IntentRouter:
         assert self.calendar is not None  # resolve() гарантирует календарь до вызова
         tz = ZoneInfo(self.calendar.timezone)
 
+        # Изменения календаря — dangerous, query_events — safe; решает _gate по
+        # таблице рисков (low здесь не влияет: dangerous всегда confirm).
         if intent == "query_events":
-            return Resolution("execute", action={"type": "query_events", "filter": data.get("filter")})
+            return self._gate(intent, {"type": "query_events", "filter": data.get("filter")}, "", False)
 
         if intent == "create_event":
             title = str(data.get("title") or "").strip()
@@ -634,11 +742,11 @@ class IntentRouter:
             end = self._build_dt(data.get("date"), data.get("end_time"), tz) or (start + timedelta(hours=1))
             label = f"создать встречу «{title}» {self._fmt_span(start, end)}?"
             label += self._conflict_suffix(start, end)
-            return Resolution(
-                "confirm",
-                action={"type": "create_event", "title": title,
-                        "start": start.isoformat(), "end": end.isoformat()},
-                label=label,
+            return self._gate(
+                intent,
+                {"type": "create_event", "title": title,
+                 "start": start.isoformat(), "end": end.isoformat()},
+                label, False,
             )
 
         if intent == "move_event":
@@ -653,11 +761,11 @@ class IntentRouter:
             end = start + (single["end"] - single["start"])  # сохраняем длительность
             label = f"перенести «{single['title']}» на {self._fmt_span(start, end)}?"
             label += self._conflict_suffix(start, end, ignore_id=single["id"])
-            return Resolution(
-                "confirm",
-                action={"type": "move_event", "event_id": single["id"], "title": single["title"],
-                        "start": start.isoformat(), "end": end.isoformat()},
-                label=label,
+            return self._gate(
+                intent,
+                {"type": "move_event", "event_id": single["id"], "title": single["title"],
+                 "start": start.isoformat(), "end": end.isoformat()},
+                label, False,
             )
 
         if intent == "delete_event":
@@ -666,10 +774,11 @@ class IntentRouter:
             single = self._single_event(matches, hint)
             if isinstance(single, Resolution):
                 return single
-            return Resolution(
-                "confirm",
-                action={"type": "delete_event", "event_id": single["id"], "title": single["title"]},
-                label=f"удалить встречу «{single['title']}» ({self._fmt_span(single['start'], single['end'])})?",
+            return self._gate(
+                intent,
+                {"type": "delete_event", "event_id": single["id"], "title": single["title"]},
+                f"удалить встречу «{single['title']}» ({self._fmt_span(single['start'], single['end'])})?",
+                False,
             )
 
         return Resolution("chat")
@@ -775,6 +884,9 @@ class IntentRouter:
         if kind == "complete_task":
             after = self.tasks.update(action["task_id"], status="done")
             return f"✅ Отметил выполненной: «{action['title']}»", str(action["task_id"]), after, True
+        if kind == "edit_task":  # edit_last: правка поля последней задачи (логируется как update)
+            after = self.tasks.update(action["task_id"], **action["fields"])
+            return f"✏️ Изменил задачу «{after['title']}»", str(action["task_id"]), after, True
         if kind == "restore_task":  # реверс undo: вернуть прежние поля задачи
             after = self.tasks.update(action["task_id"], **action["fields"])
             return f"↩️ Вернул задачу «{action['title']}»", str(action["task_id"]), after, True
@@ -801,7 +913,7 @@ class IntentRouter:
                 return "Инбокс не настроен 🤔", None, None, False
             item = self.inbox.create(action["text"], source="telegram")
             return f"📥 Записал в инбокс: «{item['text']}»", None, None, False
-        if kind in ("create_contact", "update_contact", "restore_contact",
+        if kind in ("create_contact", "update_contact", "edit_contact", "restore_contact",
                     "delete_contact", "query_contacts"):
             return self._apply_contact(action)
         if kind in ("save_link", "mark_read", "restore_read", "delete_read", "query_reads"):
