@@ -17,14 +17,16 @@ def test_dashboard_serves_index_html():
     r = _client().get("/dashboard/")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    assert "J.A.R.V.I.S. Dashboard" in r.text
+    # Проверяем, что отдаётся именно HTML-документ, а не конкретную вёрстку
+    # (содержимое дашборда живёт отдельно и меняется независимо от этого теста).
+    assert "<!doctype html" in r.text.lower()
 
 
 def test_dashboard_bare_path_reaches_index():
     # /dashboard без слэша → редирект на /dashboard/ → та же страница
     r = _client().get("/dashboard", follow_redirects=True)
     assert r.status_code == 200
-    assert "Dashboard" in r.text
+    assert "<!doctype html" in r.text.lower()
 
 
 def test_api_route_still_works_alongside_mount():
