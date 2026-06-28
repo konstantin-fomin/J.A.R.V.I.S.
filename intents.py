@@ -41,6 +41,7 @@ INTENTS = {
     "save_link",
     "query_reads",
     "mark_read",
+    "query_weekly_review",
     "undo_last",
     "none",
 }
@@ -92,6 +93,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - save_link — сохранить ссылку «на потом» / «почитать позже» / «в закладки». Срабатывает ТОЛЬКО если в сообщении есть URL И явный контекст отложенного чтения («почитаю потом», «на потом», «сохрани ссылку», «в закладки»). Просто URL без такого контекста — НЕ save_link (это обычное сообщение none). Поле: url (сам адрес).
 - query_reads — показать список «почитать» («что у меня в почитать», «непрочитанные ссылки»). Полей нет.
 - mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
+- query_weekly_review — сводка/итоги за неделю («сводка за неделю», «что у меня было на этой неделе», «подведи итоги недели»). Полей нет.
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
@@ -335,6 +337,10 @@ class IntentRouter:
             if self.reads is None:
                 return Resolution("message", text="Read-it-later не настроен 🤔")
             return self._resolve_read(intent, data, low)
+
+        if intent == "query_weekly_review":
+            # read-only; расчёт+саммари делает хендлер (у него есть LLM)
+            return Resolution("execute", action={"type": "query_weekly_review"})
 
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:

@@ -1,7 +1,7 @@
 """Обработчики команд и сообщений Telegram-бота."""
 import asyncio
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
@@ -16,6 +16,7 @@ from memory.manager import MemoryManager
 from reads import enrich_link
 from tasks import TaskStore
 from voice import VoiceError, transcribe_voice
+from weekly_review import compose_summary, compute_week_stats, format_review
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ class Handlers:
         self.suggestlog = suggestlog  # SuggestionLog | None — лог проактивных подсказок
         self.contacts = contacts      # ContactStore | None — лёгкий CRM
         self.reads = reads            # ReadStore | None — read-it-later
+        self.action_log = action_log  # ActionLog | None — нужен для weekly review
         self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts, reads)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -441,6 +443,9 @@ class Handlers:
             if resolution.action["type"] == "save_link":
                 await self._save_link(update, resolution.action)
                 return
+            if resolution.action["type"] == "query_weekly_review":
+                await self._weekly_review(update)
+                return
             reply = await asyncio.to_thread(self.router.execute, resolution.action)
             for part in _split_message(reply):
                 await update.message.reply_text(part)
@@ -467,6 +472,26 @@ class Handlers:
         action["params"].update(title=info["title"], summary=info["summary"])
         reply = await asyncio.to_thread(self.router.execute, action)
         for part in _split_message(reply):
+            await update.message.reply_text(part)
+
+    async def _weekly_review(self, update: Update) -> None:
+        """query_weekly_review: цифры считает compute_week_stats (чистый Python над
+        сторами), а compose_summary оборачивает их через LLM. IntentRouter без LLM,
+        поэтому собираем здесь. LLM упал — шлём детерминированный format_review."""
+        await update.message.chat.send_action(ChatAction.TYPING)
+        end = date.today()
+        start = end - timedelta(days=6)  # последние 7 дней включительно
+        stats = await asyncio.to_thread(
+            compute_week_stats, start, end,
+            tasks=self.tasks, bills=self.bills, contacts=self.contacts,
+            reads=self.reads, log=self.action_log,
+        )
+        try:
+            text = await asyncio.to_thread(compose_summary, self.llm, stats)
+        except Exception:
+            logger.exception("weekly review: LLM упал — шлю детерминированную сводку")
+            text = format_review(stats)
+        for part in _split_message(text):
             await update.message.reply_text(part)
 
     async def read_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

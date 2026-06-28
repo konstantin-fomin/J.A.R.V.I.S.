@@ -106,6 +106,19 @@ class ActionLog:
                 "UPDATE action_log SET status = 'undone' WHERE id = ?", (log_id,)
             )
 
+    def actions_between(self, start: str, end: str) -> list[dict]:
+        """Записи журнала с timestamp в [start, end) — для weekly review (§16).
+
+        start/end — ISO-строки; ISO сравнивается лексикографически = хронологически,
+        поэтому достаточно простого диапазона по текстовой колонке timestamp."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM action_log WHERE timestamp >= ? AND timestamp < ? "
+                "ORDER BY id",
+                (start, end),
+            ).fetchall()
+        return [d for r in rows if (d := self._row_to_dict(r)) is not None]
+
     @staticmethod
     def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
         if row is None:

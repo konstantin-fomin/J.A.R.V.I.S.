@@ -34,6 +34,7 @@ from memory.manager import MemoryManager
 from reads import ReadStore
 from suggestions import ProactiveSuggester, SuggestionLog, build_suggestion_text, propose_label
 from tasks import TaskStore
+from weekly_review import compose_summary, compute_week_stats, format_review
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,10 @@ BIRTHDAY_REMINDER_TIME = time(hour=9, minute=30)
 
 # Время еженедельного дайджеста «почитать» (§15). Сам интервал — раз в неделю.
 READS_DIGEST_TIME = time(hour=11, minute=0)
+
+# Еженедельная сводка (§16): воскресенье вечером. Отдельное от reads_digest время,
+# чтобы не прислать два сообщения подряд.
+WEEKLY_REVIEW_TIME = time(hour=19, minute=0)
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
@@ -186,6 +191,32 @@ async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def weekly_review(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в неделю (воскресенье вечером): сводка за последние 7 дней (§16).
+
+    Цифры считает compute_week_stats (чистый Python над сторами), compose_summary
+    оборачивает их через Gemini. LLM упал — шлём детерминированный format_review.
+    Тяжёлое (SQLite + LLM) уводим в поток, чтобы не блокировать event loop."""
+    data = context.job.data
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        logger.warning("ALLOWED_USER_ID не задан — некому слать сводку за неделю")
+        return
+    end = date.today()
+    start = end - timedelta(days=6)
+    stats = await asyncio.to_thread(
+        compute_week_stats, start, end,
+        tasks=data["tasks"], bills=data["bills"], contacts=data["contacts"],
+        reads=data["reads"], log=data["log"],
+    )
+    try:
+        text = await asyncio.to_thread(compose_summary, data["llm"], stats)
+    except Exception:
+        logger.exception("weekly review: LLM упал — шлю детерминированную сводку")
+        text = format_review(stats)
+    await context.bot.send_message(chat_id=chat_id, text=text)
+
+
 async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в день: ищет в журнале повторяющиеся темы и предлагает превратить их
     в задачу (§13). Для каждой темы — отдельное сообщение с кнопками Да/Нет.
@@ -286,6 +317,19 @@ def build_application(
                 reads_digest, interval=timedelta(weeks=1), first=READS_DIGEST_TIME,
                 data=reads, name="reads_digest",
             )
+        # Еженедельная сводка — воскресенье вечером. first вычисляем как ближайшее
+        # воскресенье в WEEKLY_REVIEW_TIME (Пн=0..Вс=6), дальше раз в неделю.
+        now = datetime.now()
+        days_ahead = (6 - now.weekday()) % 7
+        first_review = datetime.combine(now.date() + timedelta(days=days_ahead), WEEKLY_REVIEW_TIME)
+        if first_review <= now:
+            first_review += timedelta(weeks=1)
+        app.job_queue.run_repeating(
+            weekly_review, interval=timedelta(weeks=1), first=first_review,
+            data={"tasks": tasks, "bills": bills, "contacts": contacts,
+                  "reads": reads, "log": action_log, "llm": llm},
+            name="weekly_review",
+        )
         # Напоминания о встречах — только если календарь настроен
         if calendar is not None:
             app.job_queue.run_repeating(

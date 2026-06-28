@@ -70,6 +70,10 @@ BIRTHDAY_REMINDER_LEAD_DAYS = int(os.getenv("BIRTHDAY_REMINDER_LEAD_DAYS") or 3)
 # раз в неделю (job reads_digest), а не ежедневно.
 READS_DB_PATH = Path(os.getenv("READS_DB_PATH") or (BASE_DIR / "reads.db"))
 
+# Weekly review (§16) своей БД не имеет — только читает чужие сторы. Время рассылки
+# (воскресенье вечером) — константа WEEKLY_REVIEW_TIME в bot/telegram_bot.py, как
+# и остальные *_REMINDER_TIME.
+
 # Проактивные подсказки из заметок (§13). SQLite-лог показанных подсказок —
 # отдельно от остальных. Параметры кластеризации совпадают с дефолтами
 # ProactiveSuggester (окно 14 дней, минимум 3 записи, не повторять тему чаще

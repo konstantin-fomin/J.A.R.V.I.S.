@@ -18,6 +18,15 @@ actions.db-wal
 inbox.db
 inbox.db-journal
 inbox.db-wal
+suggestions.db
+suggestions.db-journal
+suggestions.db-wal
+contacts.db
+contacts.db-journal
+contacts.db-wal
+reads.db
+reads.db-journal
+reads.db-wal
 K:/OBSIDIAN/
 
 # Python
