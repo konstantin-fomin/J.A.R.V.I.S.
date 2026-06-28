@@ -880,3 +880,83 @@ config.BIRTHDAY_REMINDER_LEAD_DAYS)` и, если есть, шлёт одно с
 
 `CONTACTS_DB_PATH`, `BIRTHDAY_REMINDER_TIME`, `BIRTHDAY_REMINDER_LEAD_DAYS` (3).
 `contacts.db` — bind-mount в docker-compose (как tasks/bills/actions/inbox).
+
+## 15. Read-it-later (дизайн)
+
+«Скинул ссылку — почитаю потом». Бот сохраняет ссылку, сам делает короткое
+саммари страницы и раз в неделю присылает дайджест непрочитанного. Идея — не
+копить вкладки: пара предложений по каждой ссылке помогает решить, читать или
+выкинуть.
+
+### Зачем
+
+Ссылки «на потом» обычно тонут. Здесь они складываются в один список с готовым
+саммари (не нужно открывать, чтобы вспомнить, о чём это), а еженедельный дайджест
+напоминает разгрести очередь.
+
+### Хранение — `reads.py`
+
+Одна таблица `reads` (стиль tasks.py):
+
+| поле         | тип   | смысл                                  |
+|--------------|-------|----------------------------------------|
+| `id`         | INT PK| автоинкремент                          |
+| `url`        | TEXT  | ссылка (обязательно)                   |
+| `title`      | TEXT? | заголовок страницы (если достали)      |
+| `summary`    | TEXT? | саммари 2–3 предложения (Gemini)       |
+| `status`     | TEXT  | `unread` / `read`                      |
+| `created_at` | TEXT  | ISO-таймстамп                          |
+
+Методы: `create / get / list(status) / mark_read / delete`.
+
+### Скачивание и саммари
+
+**Саммари считается ОДИН раз — при сохранении**, и кладётся в БД. Дайджест потом
+просто читает готовый `summary`, не дёргая LLM на каждый показ.
+
+- `fetch_article(url)` — `httpx.get` (редиректы, таймаут, User-Agent) → HTML.
+- `extract_article(html, url)` — **чистая функция** (без сети): BeautifulSoup на
+  `html.parser`, без `lxml`. Берём `og:title`/`<title>` и `og:description`/`meta
+  description` + текст первых `<p>` (обрезаем до ~3000 символов). Полный
+  ридабилити-парсинг не нужен — для саммари хватает заголовка, описания и начала.
+- `summarize_article(llm, title, text)` — один вызов Gemini: 2–3 предложения
+  по-русски.
+- `enrich_link(llm, url)` — оркестратор: fetch → extract → summarize, возвращает
+  `{url, title, summary}`. Сеть/парсинг обёрнуты в try/except: не достали
+  страницу — сохраняем со `summary = "(не удалось получить превью)"`, ссылку не
+  теряем.
+
+`extract_article` отделена от сети намеренно: её логика покрыта юнит-тестом на
+статичном HTML, а реальное скачивание проверяется отдельным live-прогоном (сеть в
+обычные тесты не тащим — см. конвенцию «сеть не дёргаем»).
+
+### Intents
+
+- **`save_link`** — Gemini детектит URL **с явным контекстом «почитать позже / на
+  потом / в закладки»**, а не любой URL в сообщении. Поле: `url`. Сохранение
+  идёт через хендлер (там есть LLM): `enrich_link` в `to_thread`, затем
+  `IntentRouter.execute({type: save_link, params: {url, title, summary}})` —
+  значит мутация логируется (entity_type=read) и отменяема.
+- **`query_reads`** — «что у меня в почитать» — список `unread` в любой момент,
+  не только по дайджесту. Read-only.
+- **`mark_read`** — отметить ссылку прочитанной (по `title_hint`/URL). Дубль —
+  кнопка «✓ Прочитано» под каждой записью в дайджесте (`reads_done:<id>`).
+
+### Проводка и Undo
+
+`save_link` → (read, create), `mark_read` → (read, update) в Action Log. Реверсы:
+create→delete, update→restore прежнего `status`. То есть `undo_last` уберёт
+случайно сохранённую ссылку или вернёт ошибочно отмеченную обратно в `unread`.
+`IntentRouter` остаётся без LLM: саммари ему приносят уже готовым в `params`.
+
+### Еженедельный дайджест — `bot/telegram_bot.py`
+
+Job `reads_digest` — **раз в неделю** (не daily): `run_repeating(interval=
+timedelta(weeks=1), first=READS_DIGEST_TIME)`. Берёт `reads.list("unread")`,
+шлёт список (title + summary) с кнопкой «✓ Прочитано» у каждой. Пусто —
+молчит.
+
+### `config.py`
+
+`READS_DB_PATH`, `READS_DIGEST_TIME`. `reads.db` — bind-mount в docker-compose
+(как tasks/bills/actions/inbox/contacts).

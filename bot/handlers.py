@@ -13,6 +13,7 @@ from intents import IntentRouter, parse_intent
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from reads import enrich_link
 from tasks import TaskStore
 from voice import VoiceError, transcribe_voice
 
@@ -85,6 +86,9 @@ INBOX_TO_TASK_PREFIX = "inbox2task:"
 SUGGEST_TASK_PREFIX = "sg_task:"   # «Да» → создать задачу
 SUGGEST_DISMISS_PREFIX = "sg_skip:"  # «Нет» → ничего не делать
 
+# Префикс callback_data кнопки «✓ Прочитано» в дайджесте «почитать»: "reads_done:<id>"
+READS_DONE_PREFIX = "reads_done:"
+
 
 def format_bills(instances: list[dict], header: str) -> str:
     """Список начислений со статусами — для /bills и напоминаний."""
@@ -138,6 +142,7 @@ class Handlers:
         inbox=None,
         suggestlog=None,
         contacts=None,
+        reads=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -148,7 +153,8 @@ class Handlers:
         self.inbox = inbox
         self.suggestlog = suggestlog  # SuggestionLog | None — лог проактивных подсказок
         self.contacts = contacts      # ContactStore | None — лёгкий CRM
-        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts)
+        self.reads = reads            # ReadStore | None — read-it-later
+        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts, reads)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -432,6 +438,9 @@ class Handlers:
             await update.message.reply_text(resolution.text)
             return
         if resolution.kind == "execute":
+            if resolution.action["type"] == "save_link":
+                await self._save_link(update, resolution.action)
+                return
             reply = await asyncio.to_thread(self.router.execute, resolution.action)
             for part in _split_message(reply):
                 await update.message.reply_text(part)
@@ -447,6 +456,47 @@ class Handlers:
                 ]
             )
             await update.message.reply_text(f"Уточню: {resolution.label}", reply_markup=keyboard)
+
+    async def _save_link(self, update: Update, action: dict) -> None:
+        """save_link: качаем страницу + саммари (сеть+LLM, поэтому в to_thread),
+        дотягиваем title/summary в params и сохраняем штатным execute (логируется,
+        отменяемо). Сам сейв вынесен сюда из IntentRouter — там нет LLM/сети."""
+        url = action["params"]["url"]
+        await update.message.chat.send_action(ChatAction.TYPING)
+        info = await asyncio.to_thread(enrich_link, self.llm, url)
+        action["params"].update(title=info["title"], summary=info["summary"])
+        reply = await asyncio.to_thread(self.router.execute, action)
+        for part in _split_message(reply):
+            await update.message.reply_text(part)
+
+    async def read_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Callback «✓ Прочитано» в дайджесте: отмечает ссылку прочитанной штатным
+        путём (логируется, отменяемо undo_last)."""
+        query = update.callback_query
+        if not _allowed(update):
+            await query.answer()
+            return
+        try:
+            read_id = int(query.data[len(READS_DONE_PREFIX):])
+        except (ValueError, IndexError):
+            await query.answer("Не понял кнопку 🤔")
+            return
+        item = self.reads.get(read_id) if self.reads else None
+        if item is None:
+            await query.answer("Ссылка не найдена")
+        elif item["status"] == "read":
+            await query.answer("Уже прочитано")
+        else:
+            await asyncio.to_thread(
+                self.router.execute,
+                {"type": "mark_read", "read_id": read_id, "title": item["title"] or item["url"]},
+            )
+            await query.answer("✅ Прочитано")
+        new_markup = _markup_without(query.message.reply_markup, query.data)
+        try:
+            await query.edit_message_reply_markup(reply_markup=new_markup)
+        except Exception:
+            logger.debug("Не удалось обновить клавиатуру дайджеста", exc_info=True)
 
     async def confirm_intent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback кнопок Да/Нет под подтверждением intent-действия."""

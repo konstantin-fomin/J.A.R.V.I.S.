@@ -19,6 +19,7 @@ from bills import BillStore
 from bot.handlers import (
     BILL_PAID_PREFIX,
     INBOX_TO_TASK_PREFIX,
+    READS_DONE_PREFIX,
     SUGGEST_DISMISS_PREFIX,
     SUGGEST_TASK_PREFIX,
     Handlers,
@@ -30,6 +31,7 @@ from contacts import ContactStore, days_until_birthday
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from reads import ReadStore
 from suggestions import ProactiveSuggester, SuggestionLog, build_suggestion_text, propose_label
 from tasks import TaskStore
 
@@ -43,6 +45,9 @@ SUGGEST_REMINDER_TIME = time(hour=10, minute=0)
 
 # Время ежедневной проверки ближайших дней рождения (§14).
 BIRTHDAY_REMINDER_TIME = time(hour=9, minute=30)
+
+# Время еженедельного дайджеста «почитать» (§15). Сам интервал — раз в неделю.
+READS_DIGEST_TIME = time(hour=11, minute=0)
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
@@ -154,6 +159,33 @@ async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
+async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в неделю: дайджест непрочитанных ссылок (§15). Саммари уже лежит в БД
+    (посчитано при сохранении) — здесь только показываем. У каждой записи кнопка
+    «✓ Прочитано». Пусто — молчим."""
+    reads: ReadStore = context.job.data
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        logger.warning("ALLOWED_USER_ID не задан — некому слать дайджест «почитать»")
+        return
+    items = reads.list("unread")
+    if not items:
+        return
+    lines = ["📑 Дайджест «почитать» (непрочитанное):", ""]
+    rows = []
+    for r in items:
+        head = r["title"] or r["url"]
+        lines.append(f"• {head}")
+        if r["summary"]:
+            lines.append(f"  {r['summary']}")
+        label = head if len(head) <= 30 else head[:29] + "…"
+        rows.append([InlineKeyboardButton(f"✓ Прочитано: {label}",
+                                          callback_data=f"{READS_DONE_PREFIX}{r['id']}")])
+    await context.bot.send_message(
+        chat_id=chat_id, text="\n".join(lines), reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
 async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в день: ищет в журнале повторяющиеся темы и предлагает превратить их
     в задачу (§13). Для каждой темы — отдельное сообщение с кнопками Да/Нет.
@@ -199,6 +231,7 @@ def build_application(
     action_log=None,
     inbox=None,
     contacts=None,
+    reads=None,
 ) -> Application:
     # Проактивные подсказки (§13): лог общий для job (показ/пометка) и хендлеров
     # (кнопка «Да» достаёт формулировку темы по hash). Тема формулируется LLM.
@@ -213,7 +246,7 @@ def build_application(
         repeat_block_days=config.SUGGEST_REPEAT_BLOCK_DAYS,
     )
     handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox,
-                        suggest_log, contacts)
+                        suggest_log, contacts, reads)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -226,6 +259,7 @@ def build_application(
     app.add_handler(CallbackQueryHandler(handlers.confirm_intent, pattern=r"^intent_(yes|no)$"))
     app.add_handler(CallbackQueryHandler(handlers.suggest_to_task, pattern=f"^{SUGGEST_TASK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.suggest_dismiss, pattern=f"^{SUGGEST_DISMISS_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(handlers.read_done, pattern=f"^{READS_DONE_PREFIX}"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handlers.handle_voice))
 
@@ -245,6 +279,12 @@ def build_application(
             app.job_queue.run_daily(
                 birthday_reminder, time=BIRTHDAY_REMINDER_TIME, data=contacts,
                 name="birthday_reminder",
+            )
+        # Еженедельный дайджест «почитать» — если read-it-later настроен
+        if reads is not None:
+            app.job_queue.run_repeating(
+                reads_digest, interval=timedelta(weeks=1), first=READS_DIGEST_TIME,
+                data=reads, name="reads_digest",
             )
         # Напоминания о встречах — только если календарь настроен
         if calendar is not None:
@@ -274,10 +314,11 @@ def run_bot(
     action_log=None,
     inbox=None,
     contacts=None,
+    reads=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts).run_polling(
+                      inbox, contacts, reads).run_polling(
         drop_pending_updates=True
     )
 
@@ -293,12 +334,13 @@ def run_bot_in_thread(
     action_log=None,
     inbox=None,
     contacts=None,
+    reads=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts).run_polling(
+                      inbox, contacts, reads).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

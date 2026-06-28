@@ -38,6 +38,9 @@ INTENTS = {
     "update_contact",
     "query_contacts",
     "delete_contact",
+    "save_link",
+    "query_reads",
+    "mark_read",
     "undo_last",
     "none",
 }
@@ -60,6 +63,8 @@ _LOGGED = {
     "create_contact": ("contact", "create"),
     "update_contact": ("contact", "update"),
     "delete_contact": ("contact", "delete"),
+    "save_link": ("read", "create"),
+    "mark_read": ("read", "update"),
 }
 
 PROMPT = """Ты — парсер намерений личного ассистента. Определи, что пользователь \
@@ -84,6 +89,9 @@ PROMPT = """Ты — парсер намерений личного ассист
 - update_contact — отметить, что пообщался с человеком, и/или дописать заметку («созвонился с …», «виделся с …», «заметка про …»). Поля: name_hint (кто), note (что дописать или null). last_contact_date выставится на сегодня автоматически.
 - query_contacts — показать контакты. Поле: filter ("upcoming_birthdays" — у кого скоро день рождения | "by_name" — поиск по имени | null — все). Для by_name заполни name.
 - delete_contact — удалить контакт. Поле: name_hint.
+- save_link — сохранить ссылку «на потом» / «почитать позже» / «в закладки». Срабатывает ТОЛЬКО если в сообщении есть URL И явный контекст отложенного чтения («почитаю потом», «на потом», «сохрани ссылку», «в закладки»). Просто URL без такого контекста — НЕ save_link (это обычное сообщение none). Поле: url (сам адрес).
+- query_reads — показать список «почитать» («что у меня в почитать», «непрочитанные ссылки»). Полей нет.
+- mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
@@ -99,7 +107,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -171,6 +179,18 @@ def format_contacts(items: list[dict], header: str) -> str:
     return "\n".join(lines)
 
 
+def format_reads(items: list[dict]) -> str:
+    """Список «почитать»: заголовок (или url) + саммари под ним."""
+    if not items:
+        return "В «почитать» пусто 📭"
+    lines = ["📑 Почитать позже:", ""]
+    for r in items:
+        lines.append(f"• {r['title'] or r['url']}")
+        if r["summary"]:
+            lines.append(f"  {r['summary']}")
+    return "\n".join(lines)
+
+
 @dataclass
 class Resolution:
     """Что бот должен сделать с разобранным намерением.
@@ -191,13 +211,14 @@ class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
     def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None,
-                 action_log=None, inbox=None, contacts=None):
+                 action_log=None, inbox=None, contacts=None, reads=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
         self.log = action_log     # ActionLog | None — журнал для undo_last
         self.inbox = inbox        # InboxStore | None — быстрый захват
         self.contacts = contacts  # ContactStore | None — лёгкий CRM
+        self.reads = reads        # ReadStore | None — read-it-later
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -310,6 +331,11 @@ class IntentRouter:
                 return Resolution("message", text="Контакты не настроены 🤔")
             return self._resolve_contact(intent, data, low)
 
+        if intent in ("save_link", "query_reads", "mark_read"):
+            if self.reads is None:
+                return Resolution("message", text="Read-it-later не настроен 🤔")
+            return self._resolve_read(intent, data, low)
+
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:
                 return Resolution(
@@ -413,6 +439,28 @@ class IntentRouter:
         # query_contacts — read-only
         return self._query_contacts(action), None, None, False
 
+    def _apply_read(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
+        """Действия read-it-later. Сюда не попадаем без настроенного ReadStore."""
+        assert self.reads is not None
+        kind = action["type"]
+        if kind == "save_link":
+            p = action["params"]  # url + (title/summary, дотянутые хендлером)
+            r = self.reads.create(url=p["url"], title=p.get("title"), summary=p.get("summary"))
+            head = r["title"] or r["url"]
+            summ = f"\n{r['summary']}" if r["summary"] else ""
+            return f"🔖 Сохранил в «почитать»: «{head}»{summ}", str(r["id"]), r, True
+        if kind == "mark_read":
+            after = self.reads.mark_read(action["read_id"])
+            return f"✅ Отметил прочитанным: «{action['title']}»", str(action["read_id"]), after, True
+        if kind == "restore_read":  # реверс undo: вернуть прежний статус
+            after = self.reads.set_status(action["read_id"], action["status"])
+            return f"↩️ Вернул ссылку в «{action['status']}»", str(action["read_id"]), after, True
+        if kind == "delete_read":  # реверс undo save_link
+            self.reads.delete(action["read_id"])
+            return "↩️ Убрал ссылку из «почитать»", str(action["read_id"]), None, True
+        # query_reads — read-only
+        return format_reads(self.reads.list("unread")), None, None, False
+
     def _query_contacts(self, action: dict) -> str:
         assert self.contacts is not None
         filt = action.get("filter")
@@ -427,6 +475,40 @@ class IntentRouter:
                 f"Не нашёл контактов по «{name}»."
         items = self.contacts.list()
         return format_contacts(items, "👤 Контакты:")
+
+    # --- Read-it-later (§15) -------------------------------------------------
+    # save_link — всегда execute (хендлер обогатит params саммари до вызова
+    # execute); query_reads — read-only; mark_read — по подстроке заголовка.
+    # Все мутации логируются (entity_type=read) и отменяемы.
+
+    def _resolve_read(self, intent: str, data: dict, low: bool) -> Resolution:
+        assert self.reads is not None
+
+        if intent == "save_link":
+            url = str(data.get("url") or "").strip()
+            if not url:
+                return Resolution("chat")  # нет ссылки — обычный разговор
+            # title/summary дотянет хендлер (там есть LLM и сеть), здесь только url
+            return Resolution("execute", action={"type": "save_link", "params": {"url": url}})
+
+        if intent == "query_reads":
+            return Resolution("execute", action={"type": "query_reads"})
+
+        if intent == "mark_read":
+            hint = (data.get("title_hint") or data.get("title") or "").strip().lower()
+            matches = [r for r in self.reads.list("unread")
+                       if hint and (hint in (r["title"] or "").lower() or hint in r["url"].lower())]
+            if not matches:
+                return Resolution("message", text=f"Не нашёл непрочитанную ссылку похожую на «{hint}».")
+            if len(matches) > 1:
+                heads = ", ".join(f"«{r['title'] or r['url']}»" for r in matches[:5])
+                return Resolution("message", text=f"Нашёл несколько ссылок: {heads}. Уточни, какую.")
+            r = matches[0]
+            return self._auto_or_confirm(
+                {"type": "mark_read", "read_id": r["id"], "title": r["title"] or r["url"]},
+                f"отметить прочитанной «{r['title'] or r['url']}»?", low,
+            )
+        return Resolution("chat")
 
     # --- Отмена последнего действия (undo_last) ------------------------------
     # Берём самую свежую запись журнала status='active', строим обратное
@@ -492,6 +574,13 @@ class IntentRouter:
                 params = {k: before[k] for k in ("name", "last_contact_date", "birthday", "notes")
                           if before.get(k) is not None}
                 return {"type": "create_contact", "params": params}
+
+        if et == "read":
+            if act == "create":  # сохранили ссылку → удаляем
+                return {"type": "delete_read", "read_id": int(eid)}
+            if act == "update" and before is not None:  # отметили прочитанной → вернуть статус
+                return {"type": "restore_read", "read_id": int(eid),
+                        "status": before.get("status", "unread")}
 
         if et == "calendar_event":
             if act == "create":  # создали встречу → удаляем
@@ -709,6 +798,8 @@ class IntentRouter:
         if kind in ("create_contact", "update_contact", "restore_contact",
                     "delete_contact", "query_contacts"):
             return self._apply_contact(action)
+        if kind in ("save_link", "mark_read", "restore_read", "delete_read", "query_reads"):
+            return self._apply_read(action)
         if kind == "mark_bill_paid":
             after = self.bills.set_status(action["instance_id"], "paid")
             return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True
@@ -769,6 +860,9 @@ class IntentRouter:
         if entity_type == "contact":
             assert self.contacts is not None
             return self.contacts.get(action["contact_id"])
+        if entity_type == "read":
+            assert self.reads is not None
+            return self.reads.get(action["read_id"])
         if entity_type == "calendar_event":
             assert self.calendar is not None
             return self._event_state(self.calendar.get_event(action["event_id"]))

@@ -66,6 +66,10 @@ CONTACTS_DB_PATH = Path(os.getenv("CONTACTS_DB_PATH") or (BASE_DIR / "contacts.d
 # За сколько дней до дня рождения присылать ежедневное напоминание.
 BIRTHDAY_REMINDER_LEAD_DAYS = int(os.getenv("BIRTHDAY_REMINDER_LEAD_DAYS") or 3)
 
+# Read-it-later (§15). SQLite, отдельно от остальных. Дайджест непрочитанного —
+# раз в неделю (job reads_digest), а не ежедневно.
+READS_DB_PATH = Path(os.getenv("READS_DB_PATH") or (BASE_DIR / "reads.db"))
+
 # Проактивные подсказки из заметок (§13). SQLite-лог показанных подсказок —
 # отдельно от остальных. Параметры кластеризации совпадают с дефолтами
 # ProactiveSuggester (окно 14 дней, минимум 3 записи, не повторять тему чаще
