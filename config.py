@@ -58,6 +58,9 @@ BILLS_DB_PATH = Path(os.getenv("BILLS_DB_PATH") or (BASE_DIR / "bills.db"))
 # Журнал действий для отмены (undo_last). SQLite, отдельно от tasks/bills.
 ACTION_LOG_DB_PATH = Path(os.getenv("ACTION_LOG_DB_PATH") or (BASE_DIR / "actions.db"))
 
+# Инбокс (быстрый захват). SQLite, отдельно от остальных.
+INBOX_DB_PATH = Path(os.getenv("INBOX_DB_PATH") or (BASE_DIR / "inbox.db"))
+
 # Google Calendar (опционально). Бот работает и без настроенного календаря:
 # нет credentials/token → load_calendar() возвращает None, фичи просто отключены.
 # token.json генерируется отдельным скриптом generate_calendar_token.py на машине

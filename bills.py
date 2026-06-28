@@ -47,12 +47,17 @@ class BillStore:
                     amount REAL,
                     day_of_month INTEGER NOT NULL,
                     category TEXT,
+                    project TEXT,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            # Миграция старых баз: добавляем project, если колонки ещё нет.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(bill_templates)")}
+            if "project" not in cols:
+                conn.execute("ALTER TABLE bill_templates ADD COLUMN project TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bill_instances (
@@ -77,14 +82,15 @@ class BillStore:
         day_of_month: int,
         amount: Optional[float] = None,
         category: Optional[str] = None,
+        project: Optional[str] = None,
     ) -> dict:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO bill_templates "
-                "(name, amount, day_of_month, category, active, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 1, ?, ?)",
-                (name, amount, day_of_month, category, now, now),
+                "(name, amount, day_of_month, category, project, active, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                (name, amount, day_of_month, category, project, now, now),
             )
             template_id = cur.lastrowid
         return self.get_template(template_id)

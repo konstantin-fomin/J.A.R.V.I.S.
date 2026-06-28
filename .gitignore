@@ -15,6 +15,9 @@ bills.db-wal
 actions.db
 actions.db-journal
 actions.db-wal
+inbox.db
+inbox.db-journal
+inbox.db-wal
 K:/OBSIDIAN/
 
 # Python

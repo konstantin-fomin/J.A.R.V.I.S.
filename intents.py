@@ -32,6 +32,8 @@ INTENTS = {
     "move_event",
     "delete_event",
     "query_events",
+    "query_by_project",
+    "capture",
     "undo_last",
     "none",
 }
@@ -55,7 +57,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 Сегодня: {date}
 
 Возможные intent:
-- create_task — создать задачу/напоминание. Поля: title (строка), due_date ("ГГГГ-ММ-ДД" или null), due_time ("ЧЧ:ММ" или null), priority ("low"|"normal"|"high").
+- create_task — создать задачу/напоминание. Поля: title (строка), due_date ("ГГГГ-ММ-ДД" или null), due_time ("ЧЧ:ММ" или null), priority ("low"|"normal"|"high"), project (тема/проект или null).
 - complete_task — отметить задачу выполненной. Поле: title_hint.
 - delete_task — удалить задачу. Поле: title_hint.
 - query_tasks — показать задачи. Поле: filter ("today"|"all"|null).
@@ -65,20 +67,24 @@ PROMPT = """Ты — парсер намерений личного ассист
 - move_event — перенести встречу на другое время. Поля: title_hint, date (новая дата), start_time (новое время).
 - delete_event — удалить встречу из календаря. Поле: title_hint.
 - query_events — показать встречи. Поле: filter ("today"|"week"|null).
+- query_by_project — показать задачи по теме/проекту («что у меня по X», «покажи задачи по проекту X»). Поле: project (название темы).
+- capture — записать мысль в инбокс (быстрый захват без разбора). Поле: note (что записать).
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
 Правила:
 - Большинство сообщений — обычный разговор (none). Выбирай действие только если пользователь явно о нём просит.
 - title_hint/name_hint — это нечёткие слова пользователя для поиска по подстроке, НЕ точный id.
-- title_hint/name_hint возвращай в начальной форме (именительный падеж, единственное число): «квартиру»→«квартира», «задачу полить кактусы»→«полить кактус». Это нужно для поиска по подстроке.
+- title_hint/name_hint/project возвращай в начальной форме (именительный падеж, единственное число): «квартиру»→«квартира», «задачу полить кактусы»→«полить кактус», «по ремонту»→«ремонт». Это нужно для поиска по подстроке.
+- project в create_task заполняй ТОЛЬКО если пользователь явно называет тему/проект («задача по ремонту», «для проекта лендинг»); иначе null.
+- capture — это явный захват в инбокс. Срабатывает ТОЛЬКО на явный триггер: «запиши в инбокс», «в инбокс», «на заметку», «потом разберу», «закинь в инбокс». Без такого триггера это НЕ capture (обычная мысль/идея без триггера → none, конкретное дело → create_task). note — текст записи без самого триггера.
 - Относительные даты («завтра», «в пятницу», «через неделю») переводи в due_date/date относительно «сегодня».
 - Задача (task) — это дело/напоминание без конкретного времени-слота; встреча (event) — это про календарь, со временем начала. «Созвон в 15:00», «встреча с врачом завтра в 10» → create_event. «Купить молоко», «полить цветы» → create_task.
 - Заводить шаблон платежа через текст нельзя — это none.
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -157,11 +163,13 @@ class Resolution:
 class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
-    def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None, action_log=None):
+    def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None,
+                 action_log=None, inbox=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
         self.log = action_log     # ActionLog | None — журнал для undo_last
+        self.inbox = inbox        # InboxStore | None — быстрый захват
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -199,7 +207,7 @@ class IntentRouter:
             if not title:
                 return Resolution("chat")  # нечего создавать — пусть отвечает обычно
             params = {"title": title, "priority": data.get("priority") or "normal", "source": "telegram"}
-            for key in ("due_date", "due_time"):
+            for key in ("due_date", "due_time", "project"):
                 if data.get(key):
                     params[key] = data[key]
             return self._auto_or_confirm(
@@ -253,6 +261,21 @@ class IntentRouter:
 
         if intent == "query_bills":
             return self._auto_or_confirm({"type": "query_bills"}, "показать платежи?", low)
+
+        if intent == "query_by_project":
+            project = str(data.get("project") or "").strip()
+            if not project:
+                return Resolution("chat")  # без темы — обычный разговор
+            # read-only → выполняем сразу, без подтверждения
+            return Resolution("execute", action={"type": "query_by_project", "project": project})
+
+        if intent == "capture":
+            note = str(data.get("note") or "").strip()
+            if not note:
+                return Resolution("chat")  # нечего записывать
+            return self._auto_or_confirm(
+                {"type": "capture", "text": note}, f"записать в инбокс «{note}»?", low
+            )
 
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:
@@ -521,6 +544,20 @@ class IntentRouter:
             else:
                 items = self.tasks.list()
             return format_tasks(items), None, None, False
+        if kind == "query_by_project":
+            # Подстрочный матч по project (Python .lower() корректен и для кириллицы,
+            # в отличие от SQL LIKE). Склонения нормализует парсер (именительный падеж).
+            proj = (action.get("project") or "").strip()
+            needle = proj.lower()
+            items = [t for t in self.tasks.list() if needle and needle in (t["project"] or "").lower()]
+            if not items:
+                return f"По теме «{proj}» задач нет.", None, None, False
+            return format_tasks(items), None, None, False
+        if kind == "capture":
+            if self.inbox is None:
+                return "Инбокс не настроен 🤔", None, None, False
+            item = self.inbox.create(action["text"], source="telegram")
+            return f"📥 Записал в инбокс: «{item['text']}»", None, None, False
         if kind == "mark_bill_paid":
             after = self.bills.set_status(action["instance_id"], "paid")
             return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True

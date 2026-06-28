@@ -640,3 +640,49 @@ bind-mount в `docker-compose.yml` (те же грабли одиночного 
 до `docker compose up`), в `.gitignore`. Веб-дашборд правит задачи/платежи напрямую
 через стора (минуя `IntentRouter`) — эти изменения **не** журналируются и отмене не
 подлежат; undo покрывает только действия через бота.
+
+---
+
+## 11. Projects & Inbox (дизайн)
+
+Две фичи из бэклога §1: группировка задач по теме (**Projects**) и быстрый захват
+мыслей (**Inbox**). Реализовано: поле `project`, intent'ы `query_by_project`/`capture`,
+модуль `inbox.py`, команда `/inbox`.
+
+### Projects
+
+- **Схема:** nullable `project TEXT` в `tasks` и `bill_templates`. Для существующих баз
+  — миграция в `_init_db`: `PRAGMA table_info` → `ALTER TABLE … ADD COLUMN project TEXT`,
+  если колонки ещё нет (по умолчанию `project=NULL`). `tasks.create`/`create_template`
+  получают опциональный `project`; `update`/`update_template` уже generic.
+- **Парсер:** в `create_task` добавлено опциональное поле `project` — Gemini извлекает
+  тему, **только** если она явно упомянута («задача по ремонту»), иначе `null`.
+  Нормализуется в именительный падеж (как `title_hint`).
+- **Новый intent `query_by_project`** («что у меня по X», «покажи задачи по проекту X»),
+  поле `project`. Read-only → выполняется сразу (без Да/Нет). Фильтр —
+  регистронезависимый подстрочный матч в Python (`needle in (project or '').lower()`):
+  Python `.lower()` корректно работает с кириллицей, в отличие от SQL `LIKE`. Склонения
+  снимает нормализация парсера на обоих концах (и при создании, и при запросе).
+
+### Inbox
+
+- **`inbox.py` — `InboxStore`** (стиль `tasks.py`): таблица `inbox_items
+  (id, text, source, created_at, status)`, новые записи `status='pending'`. Методы
+  `create / get / list(status) / set_status`.
+- **Новый intent `capture`** — срабатывает **только на явный триггер** в тексте
+  («запиши в инбокс», «на заметку», «потом разберу», …), поле `note` (текст без
+  триггера). Это сознательное ограничение: угадывать инбокс из любой расплывчатой мысли
+  нельзя — это конфликтовало бы с `none` и `create_task`. Захват безвреден → авто на
+  high-confidence, подтверждение на low.
+- **Команда `/inbox`** — список `pending`-заметок, у каждой инлайн-кнопка «→ в задачу»
+  (`callback_data=inbox2task:<id>`). Колбэк конвертирует заметку в задачу через
+  **существующий create_task path** (`IntentRouter.execute` → задача журналируется и
+  отменяема, см. §10), помечает `inbox_item` как `processed` и убирает нажатую кнопку
+  (переиспользуется `_markup_without`, как у кнопок оплаты).
+
+### Хранение / проводка
+
+`inbox.db` — отдельная SQLite-база (`config.INBOX_DB_PATH`), bind-mount в
+`docker-compose.yml` (те же грабли одиночного файла — `touch inbox.db` до старта),
+в `.gitignore`. `InboxStore` создаётся в `main.py` и прокидывается в бот-поток →
+`Handlers` → `IntentRouter`. Веб-интерфейс инбокс не использует.

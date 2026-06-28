@@ -17,6 +17,7 @@ import config
 from bills import BillStore
 from bot.handlers import (
     BILL_PAID_PREFIX,
+    INBOX_TO_TASK_PREFIX,
     Handlers,
     bills_markup,
     format_bills,
@@ -89,15 +90,18 @@ def build_application(
     tasks: TaskStore,
     calendar=None,
     action_log=None,
+    inbox=None,
 ) -> Application:
-    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log)
+    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
     app.add_handler(CommandHandler("bills", handlers.bills_cmd))
     app.add_handler(CommandHandler("memory", handlers.show_memory))
     app.add_handler(CommandHandler("forget", handlers.forget))
+    app.add_handler(CommandHandler("inbox", handlers.inbox_cmd))
     app.add_handler(CallbackQueryHandler(handlers.mark_paid, pattern=f"^{BILL_PAID_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(handlers.inbox_to_task, pattern=f"^{INBOX_TO_TASK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.confirm_intent, pattern=r"^intent_(yes|no)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handlers.handle_voice))
@@ -134,9 +138,10 @@ def run_bot(
     tasks: TaskStore,
     calendar=None,
     action_log=None,
+    inbox=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
-    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log, inbox).run_polling(
         drop_pending_updates=True
     )
 
@@ -150,11 +155,12 @@ def run_bot_in_thread(
     tasks: TaskStore,
     calendar=None,
     action_log=None,
+    inbox=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log, inbox).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

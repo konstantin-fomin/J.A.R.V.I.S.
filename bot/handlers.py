@@ -33,6 +33,7 @@ START_TEXT = """Привет! Я твой личный ассистент с п�
 /bills — платежи текущего месяца со статусами
 /memory — что я о тебе помню (список файлов)
 /forget <тема> — удалить файл памяти
+/inbox — заметки на разбор (с кнопкой «→ в задачу»)
 📓 в начале сообщения — записать в дневник без ответа"""
 
 PLAN_PROMPT = """Ты — личный ассистент. Составь план дня для пользователя.
@@ -74,6 +75,9 @@ BILL_PAID_PREFIX = "bill_paid:"
 # callback_data кнопок Да/Нет под подтверждением intent-действия
 INTENT_YES = "intent_yes"
 INTENT_NO = "intent_no"
+
+# Префикс callback_data кнопки «→ в задачу» в /inbox: "inbox2task:<item_id>"
+INBOX_TO_TASK_PREFIX = "inbox2task:"
 
 
 def format_bills(instances: list[dict], header: str) -> str:
@@ -125,6 +129,7 @@ class Handlers:
         tasks: TaskStore,
         calendar=None,
         action_log=None,
+        inbox=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -132,7 +137,8 @@ class Handlers:
         self.bills = bills
         self.tasks = tasks
         self.calendar = calendar
-        self.router = IntentRouter(tasks, bills, calendar, action_log)
+        self.inbox = inbox
+        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -237,6 +243,64 @@ class Handlers:
         except Exception:
             # Telegram кидает «message is not modified», если правка пустая — игнорируем
             logger.debug("Не удалось обновить клавиатуру платежей", exc_info=True)
+
+    async def inbox_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/inbox: список pending-заметок, у каждой кнопка «→ в задачу»."""
+        if not _allowed(update):
+            return
+        items = self.inbox.list(status="pending") if self.inbox else []
+        if not items:
+            await update.message.reply_text("Инбокс пуст 📥")
+            return
+        lines = ["📥 Инбокс (на разбор):", ""]
+        rows = []
+        for it in items:
+            lines.append(f"• {it['text']}")
+            label = it["text"] if len(it["text"]) <= 30 else it["text"][:29] + "…"
+            rows.append(
+                [InlineKeyboardButton(f"→ в задачу: {label}",
+                                      callback_data=f"{INBOX_TO_TASK_PREFIX}{it['id']}")]
+            )
+        markup = InlineKeyboardMarkup(rows)
+        parts = _split_message("\n".join(lines))
+        for i, part in enumerate(parts):
+            await update.message.reply_text(
+                part, reply_markup=markup if i == len(parts) - 1 else None
+            )
+
+    async def inbox_to_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Callback «→ в задачу»: конвертирует inbox_item в задачу через обычный
+        create_task path (значит, действие журналируется и отменяемо) и помечает
+        запись processed."""
+        query = update.callback_query
+        if not _allowed(update):
+            await query.answer()
+            return
+        try:
+            item_id = int(query.data[len(INBOX_TO_TASK_PREFIX):])
+        except (ValueError, IndexError):
+            await query.answer("Не понял кнопку 🤔")
+            return
+
+        item = self.inbox.get(item_id) if self.inbox else None
+        if item is None:
+            await query.answer("Запись не найдена")
+        elif item["status"] == "processed":
+            await query.answer("Уже разобрано")
+        else:
+            await asyncio.to_thread(
+                self.router.execute,
+                {"type": "create_task", "params": {"title": item["text"], "source": "inbox"}},
+            )
+            self.inbox.set_status(item_id, "processed")
+            await query.answer("✅ В задачу")
+
+        # Убираем нажатую кнопку, остальные заметки оставляем
+        new_markup = _markup_without(query.message.reply_markup, query.data)
+        try:
+            await query.edit_message_reply_markup(reply_markup=new_markup)
+        except Exception:
+            logger.debug("Не удалось обновить клавиатуру инбокса", exc_info=True)
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
