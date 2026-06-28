@@ -61,6 +61,18 @@ ACTION_LOG_DB_PATH = Path(os.getenv("ACTION_LOG_DB_PATH") or (BASE_DIR / "action
 # Инбокс (быстрый захват). SQLite, отдельно от остальных.
 INBOX_DB_PATH = Path(os.getenv("INBOX_DB_PATH") or (BASE_DIR / "inbox.db"))
 
+# Проактивные подсказки из заметок (§13). SQLite-лог показанных подсказок —
+# отдельно от остальных. Параметры кластеризации совпадают с дефолтами
+# ProactiveSuggester (окно 14 дней, минимум 3 записи, не повторять тему чаще
+# раза в 7 дней). Порог дистанции 0.28 подобран на реальных Gemini-эмбеддингах
+# живого журнала: связанные темы лежат ≤0.26, шум (общий формат записей) — от
+# ~0.31, поэтому 0.35 ошибочно сливал несвязанные дни в один кластер.
+SUGGESTIONS_DB_PATH = Path(os.getenv("SUGGESTIONS_DB_PATH") or (BASE_DIR / "suggestions.db"))
+SUGGEST_WINDOW_DAYS = int(os.getenv("SUGGEST_WINDOW_DAYS") or 14)
+SUGGEST_MAX_DISTANCE = float(os.getenv("SUGGEST_MAX_DISTANCE") or 0.28)
+SUGGEST_MIN_CLUSTER = int(os.getenv("SUGGEST_MIN_CLUSTER") or 3)
+SUGGEST_REPEAT_BLOCK_DAYS = int(os.getenv("SUGGEST_REPEAT_BLOCK_DAYS") or 7)
+
 # Google Calendar (опционально). Бот работает и без настроенного календаря:
 # нет credentials/token → load_calendar() возвращает None, фичи просто отключены.
 # token.json генерируется отдельным скриптом generate_calendar_token.py на машине

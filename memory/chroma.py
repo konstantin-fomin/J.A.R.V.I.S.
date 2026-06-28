@@ -139,3 +139,25 @@ class ChromaIndex:
     def search(self, query: str, n_results: int) -> list[tuple[str, str]]:
         """Топ-N похожих кусков памяти. Возвращает [(текст, файл), ...]."""
         return [(text, file) for text, file, _ in self.search_scored(query, n_results)]
+
+    def journal_chunks(self) -> list[dict]:
+        """Все проиндексированные чанки journal-файлов с эмбеддингами.
+
+        Возвращает [{text, file, embedding}] только для journal/*.md — это вход
+        для проактивных подсказок (§13), которым нужны сами векторы для
+        кластеризации тем. Topic/fact-файлы пропускаем (у них нет даты)."""
+        if self._collection.count() == 0:
+            return []
+        data = self._collection.get(include=["documents", "embeddings", "metadatas"])
+        docs = data.get("documents")
+        embs = data.get("embeddings")
+        metas = data.get("metadatas")
+        if docs is None or embs is None or metas is None:
+            return []
+        chunks: list[dict] = []
+        for doc, emb, meta in zip(docs, embs, metas):
+            file = (meta or {}).get("file", "")
+            if isinstance(file, str) and file.startswith("journal/"):
+                chunks.append({"text": doc, "file": file,
+                               "embedding": [float(x) for x in emb]})
+        return chunks

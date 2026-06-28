@@ -4,6 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -18,6 +19,8 @@ from bills import BillStore
 from bot.handlers import (
     BILL_PAID_PREFIX,
     INBOX_TO_TASK_PREFIX,
+    SUGGEST_DISMISS_PREFIX,
+    SUGGEST_TASK_PREFIX,
     Handlers,
     bills_markup,
     format_bills,
@@ -26,12 +29,16 @@ from calendar_client import events_to_remind
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
+from suggestions import ProactiveSuggester, SuggestionLog, build_suggestion_text, propose_label
 from tasks import TaskStore
 
 logger = logging.getLogger(__name__)
 
 # Время ежедневной проверки платежей (по времени сервера/UTC).
 BILLS_REMINDER_TIME = time(hour=9, minute=0)
+
+# Время ежедневной проверки журнала на повторяющиеся темы (§13).
+SUGGEST_REMINDER_TIME = time(hour=10, minute=0)
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
@@ -124,6 +131,40 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в день: ищет в журнале повторяющиеся темы и предлагает превратить их
+    в задачу (§13). Для каждой темы — отдельное сообщение с кнопками Да/Нет.
+
+    mark_suggested зовём СРАЗУ после успешной отправки (не после ответа
+    пользователя): иначе краш/рестарт бота между показом и ответом мог бы
+    предложить ту же тему повторно. find_suggestions блокирующий (читает индекс
+    и дёргает LLM для формулировки) — уводим в поток."""
+    suggester: ProactiveSuggester = context.job.data
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        logger.warning("ALLOWED_USER_ID не задан — некому слать подсказки из заметок")
+        return
+    try:
+        suggestions = await asyncio.to_thread(suggester.find_suggestions)
+    except Exception:
+        logger.exception("Не удалось собрать проактивные подсказки")
+        return
+    for s in suggestions:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Да", callback_data=f"{SUGGEST_TASK_PREFIX}{s['hash']}"),
+            InlineKeyboardButton("❌ Нет", callback_data=f"{SUGGEST_DISMISS_PREFIX}{s['hash']}"),
+        ]])
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=build_suggestion_text(s["label"]), reply_markup=keyboard
+            )
+        except Exception:
+            logger.exception("Не удалось отправить подсказку «%s»", s["label"])
+            continue
+        # Отправили — фиксируем показ немедленно (защита от дублей при рестарте).
+        suggester.log.mark_suggested(s["hash"], s["label"])
+
+
 def build_application(
     token: str,
     memory: MemoryManager,
@@ -135,7 +176,19 @@ def build_application(
     action_log=None,
     inbox=None,
 ) -> Application:
-    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox)
+    # Проактивные подсказки (§13): лог общий для job (показ/пометка) и хендлеров
+    # (кнопка «Да» достаёт формулировку темы по hash). Тема формулируется LLM.
+    suggest_log = SuggestionLog(config.SUGGESTIONS_DB_PATH)
+    suggester = ProactiveSuggester(
+        memory.index,
+        label_fn=lambda texts: propose_label(llm, texts),
+        log=suggest_log,
+        window_days=config.SUGGEST_WINDOW_DAYS,
+        max_distance=config.SUGGEST_MAX_DISTANCE,
+        min_cluster=config.SUGGEST_MIN_CLUSTER,
+        repeat_block_days=config.SUGGEST_REPEAT_BLOCK_DAYS,
+    )
+    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox, suggest_log)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -146,6 +199,8 @@ def build_application(
     app.add_handler(CallbackQueryHandler(handlers.mark_paid, pattern=f"^{BILL_PAID_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.inbox_to_task, pattern=f"^{INBOX_TO_TASK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.confirm_intent, pattern=r"^intent_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(handlers.suggest_to_task, pattern=f"^{SUGGEST_TASK_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(handlers.suggest_dismiss, pattern=f"^{SUGGEST_DISMISS_PREFIX}"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handlers.handle_voice))
 
@@ -154,6 +209,11 @@ def build_application(
     if app.job_queue is not None:
         app.job_queue.run_daily(
             remind_bills, time=BILLS_REMINDER_TIME, data=bills, name="remind_bills"
+        )
+        # Ежедневный разбор журнала на повторяющиеся темы (проактивные подсказки)
+        app.job_queue.run_daily(
+            suggest_from_notes, time=SUGGEST_REMINDER_TIME, data=suggester,
+            name="suggest_from_notes",
         )
         # Напоминания о встречах — только если календарь настроен
         if calendar is not None:

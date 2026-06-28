@@ -79,6 +79,12 @@ INTENT_NO = "intent_no"
 # Префикс callback_data кнопки «→ в задачу» в /inbox: "inbox2task:<item_id>"
 INBOX_TO_TASK_PREFIX = "inbox2task:"
 
+# Префиксы callback_data кнопок Да/Нет под проактивной подсказкой (§13).
+# В data — theme_hash темы (40 hex-символов), по нему достаём формулировку из
+# SuggestionLog (переживает рестарт бота).
+SUGGEST_TASK_PREFIX = "sg_task:"   # «Да» → создать задачу
+SUGGEST_DISMISS_PREFIX = "sg_skip:"  # «Нет» → ничего не делать
+
 
 def format_bills(instances: list[dict], header: str) -> str:
     """Список начислений со статусами — для /bills и напоминаний."""
@@ -130,6 +136,7 @@ class Handlers:
         calendar=None,
         action_log=None,
         inbox=None,
+        suggestlog=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -138,6 +145,7 @@ class Handlers:
         self.tasks = tasks
         self.calendar = calendar
         self.inbox = inbox
+        self.suggestlog = suggestlog  # SuggestionLog | None — лог проактивных подсказок
         self.router = IntentRouter(tasks, bills, calendar, action_log, inbox)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,6 +309,46 @@ class Handlers:
             await query.edit_message_reply_markup(reply_markup=new_markup)
         except Exception:
             logger.debug("Не удалось обновить клавиатуру инбокса", exc_info=True)
+
+    async def suggest_to_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Callback «Да» под проактивной подсказкой: создаёт задачу из темы.
+
+        Формулировку темы достаём из SuggestionLog по theme_hash (а не из памяти
+        процесса) — кнопка может прийти после рестарта бота. Создаём через обычный
+        create_task path: значит, действие журналируется и отменяемо (undo_last)."""
+        query = update.callback_query
+        if not _allowed(update):
+            await query.answer()
+            return
+        theme_hash = query.data[len(SUGGEST_TASK_PREFIX):]
+        label = self.suggestlog.label_for(theme_hash) if self.suggestlog else None
+        if not label:
+            await query.answer("Подсказка устарела 🤔")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                logger.debug("Не смог убрать клавиатуру подсказки", exc_info=True)
+            return
+        await asyncio.to_thread(
+            self.router.execute,
+            {"type": "create_task",
+             "params": {"title": label, "source": "suggestion"},
+             "source": "suggestion"},
+        )
+        await query.answer("✅ В задачу")
+        await query.edit_message_text(f"✅ Создал задачу: «{label}»")
+
+    async def suggest_dismiss(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Callback «Нет» под проактивной подсказкой: ничего не создаём.
+
+        Тема уже помечена показанной (mark_suggested при отправке), так что
+        repeat_block_days не даст спамить ей снова в ближайшие дни."""
+        query = update.callback_query
+        if not _allowed(update):
+            await query.answer()
+            return
+        await query.answer("Ок, не буду")
+        await query.edit_message_text("Ок, не превращаю в задачу 👌")
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):

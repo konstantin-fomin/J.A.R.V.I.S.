@@ -13,13 +13,15 @@ services:
     volumes:
       - ./bot-memory:/app/bot-memory
       - ./chroma_db:/app/chroma_db
-      # SQLite-базы задач, платежей, журнала действий и инбокса: одиночные файлы,
-      # хостовые .db должны существовать до старта (иначе Docker создаст на их
-      # месте каталоги). Перед `docker compose up`: touch actions.db inbox.db
+      # SQLite-базы задач, платежей, журнала действий, инбокса и лога подсказок:
+      # одиночные файлы, хостовые .db должны существовать до старта (иначе Docker
+      # создаст на их месте каталоги). Перед `docker compose up`:
+      # touch actions.db inbox.db suggestions.db
       - ./tasks.db:/app/tasks.db
       - ./bills.db:/app/bills.db
       - ./actions.db:/app/actions.db
       - ./inbox.db:/app/inbox.db
+      - ./suggestions.db:/app/suggestions.db
       # Google Calendar OAuth. token.json бот перезаписывает при рефреше — поэтому
       # rw и через volume, чтобы переживал пересборку; credentials.json только читается (ro).
       # Те же грабли с одиночными файлами: должны существовать на хосте до старта,
