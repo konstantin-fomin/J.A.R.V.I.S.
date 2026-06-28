@@ -22,14 +22,21 @@ FastAPI/uvicorn — в главном.
 ```
 main.py        точка входа: проверки env → sync памяти → бот-поток + веб
 config.py      всё из .env (пути, токены, модели, провайдер)
-bot/           Telegram: telegram_bot.py (polling) + handlers.py (команды)
+bot/           Telegram: telegram_bot.py (polling + daily-jobs) + handlers.py (команды/кнопки)
 llm/           ollama_client.py — роутер провайдеров (LLMClient.get_response) + gemini_embed
 memory/        obsidian.py (файлы) + chroma.py (индекс) + manager.py + facts.py (автоэкстракция)
 web/           server.py — FastAPI (чат + просмотр памяти)
-intents.py     свободный текст → JSON-намерение через Gemini → действие
-tasks.py       TaskStore (SQLite tasks.db)
-bills.py       BillStore (SQLite bills.db)
+intents.py     свободный текст → JSON-намерение → IntentRouter → действие над сторами
+tasks.py       TaskStore (tasks.db); bills.py BillStore (bills.db); inbox.py InboxStore (inbox.db)
+contacts.py    ContactStore (contacts.db) — лёгкий CRM (§14)
+suggestions.py проактивные подсказки из заметок (§13): кластеризация journal-тем
+logger.py      ActionLog (actions.db) — журнал мутаций + undo_last (§10)
+calendar_client.py  Google Calendar (опц., token.json); voice.py — голос → Gemini-транскрипция
 ```
+
+Все мутации (tasks/bills/calendar/contacts) проходят через `IntentRouter.execute`,
+логируются в `ActionLog` и отменяемы через `undo_last`. Ежедневные job'ы (платежи,
+ДР, проактивные подсказки) и напоминания о встречах — в `bot/telegram_bot.py`.
 
 ## Команды
 
@@ -44,8 +51,14 @@ docker compose down               # остановить
 .venv/bin/python main.py          # запуск
 .venv/bin/pip install -r requirements.txt
 
-# Тестов в репозитории сейчас нет. Если добавляешь фичу — пиши тесты (TDD-скилл).
+# Тесты (pytest, ~117 тестов в tests/)
+.venv/bin/python -m pytest tests/ -q
 ```
+
+Тесты есть (`tests/test_*.py`) — новую фичу пиши через TDD (см. TDD-скилл): сначала
+красный тест, потом реализация. Сторы тестируются как самостоятельные SQLite-базы
+на `tmp_path`, интеграция intent→действие/undo — через реальный `IntentRouter`;
+сеть/Telegram/LLM не дёргаем (эмбеддинги задаём руками, `label_fn` инъектируем).
 
 ## Конвенции
 
@@ -60,8 +73,10 @@ docker compose down               # остановить
 - **`GEMINI_API_KEY` нужен ВСЕГДА** — эмбеддинги памяти считаются через Gemini,
   даже если `LLM_PROVIDER` другой. Без ключа `main.py` падает на старте.
 - **Не переключай `LLM_PROVIDER=ollama` на VPS** — 1GB RAM, локальная модель не влезет.
-- **`.db`-файлы монтируются как bind-mount** (tasks.db, bills.db): хостовые файлы
-  должны существовать ДО `docker compose up`, иначе Docker создаст на их месте каталоги.
+- **`.db`-файлы монтируются как bind-mount** (tasks/bills/actions/inbox/suggestions/
+  contacts): хостовые файлы должны существовать ДО `docker compose up`, иначе Docker
+  создаст на их месте каталоги. Новый стор → `touch <name>.db` + добавь mount в
+  `docker-compose.yml` (иначе база эфемерна и теряется на пересборке).
 - **У веб-интерфейса нет авторизации.** Слушает localhost; наружу — только через
   reverse-proxy с auth или SSH-туннель.
 - `.env` не коммитим (в .gitignore). Шаблон — `.env.example`. Дефолт
@@ -76,7 +91,7 @@ docker compose down               # остановить
 | **superpowers** | brainstorming, TDD, systematic-debugging, code-review и др. скиллы | процессные скиллы перед любой реализацией/отладкой |
 | **pyright-lsp** | LSP-типизация Python | автоматически при правках .py |
 | **pydantic-ai** | скилл `building-pydantic-ai-agents` | когда делаем intent-схемы / Pydantic AI агентов |
-| **commit-commands** | `/commit`, `/commit-push-pr`, `/clean_gone` | git-воркфлоу (коммитить только по просьбе) |
+| **commit-commands** | `/commit`, `/commit-push-pr`, `/clean_gone` | git-воркфлоу (см. раздел Git) |
 | **claude-md-management** | `/revise-claude-md`, скилл `claude-md-improver` | поддерживать этот файл в актуальном виде |
 | **hookify** | `/hookify`, `/configure`, `/list` | автоматизировать поведение хуками |
 
@@ -89,6 +104,11 @@ docker compose down               # остановить
 
 ## Git
 
-- Коммить/пушь только по явной просьбе. На default-ветке (`main`) — сначала ветка.
+- На default-ветке (`main`) — сначала фича-ветка.
+- **Авто-мердж (дефолт):** после реализации и зелёных тестов сразу commit → push →
+  `merge --ff-only` в main → push, без ожидания явного ОК. Тесты красные или нет
+  уверенности — остановись и спроси. Чтобы две ветки от одного main влились по
+  `--ff-only`, стекай их: влить первую в main, вторую перебазировать на свежий main.
+  Разовое «подожди» в чате на конкретном шаге перекрывает дефолт.
 - Сообщения коммитов завершай строкой:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
