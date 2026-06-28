@@ -88,8 +88,9 @@ def build_application(
     bills: BillStore,
     tasks: TaskStore,
     calendar=None,
+    action_log=None,
 ) -> Application:
-    handlers = Handlers(memory, llm, facts, bills, tasks, calendar)
+    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -132,9 +133,10 @@ def run_bot(
     bills: BillStore,
     tasks: TaskStore,
     calendar=None,
+    action_log=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
-    build_application(token, memory, llm, facts, bills, tasks, calendar).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log).run_polling(
         drop_pending_updates=True
     )
 
@@ -147,11 +149,12 @@ def run_bot_in_thread(
     bills: BillStore,
     tasks: TaskStore,
     calendar=None,
+    action_log=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    build_application(token, memory, llm, facts, bills, tasks, calendar).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

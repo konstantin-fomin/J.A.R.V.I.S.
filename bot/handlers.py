@@ -124,6 +124,7 @@ class Handlers:
         bills: BillStore,
         tasks: TaskStore,
         calendar=None,
+        action_log=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -131,7 +132,7 @@ class Handlers:
         self.bills = bills
         self.tasks = tasks
         self.calendar = calendar
-        self.router = IntentRouter(tasks, bills, calendar)
+        self.router = IntentRouter(tasks, bills, calendar, action_log)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -301,6 +302,10 @@ class Handlers:
             intent_data = {"intent": "none", "confidence": "high"}
 
         resolution = self.router.resolve(intent_data)
+        # Прокидываем исходный текст в журнал действий (для execute и confirm —
+        # action один и тот же объект, в т.ч. когда он осядет в pending_action).
+        if resolution.action is not None:
+            resolution.action["raw_message"] = text
         if resolution.kind != "chat":
             await self._handle_resolution(update, context, resolution)
             return

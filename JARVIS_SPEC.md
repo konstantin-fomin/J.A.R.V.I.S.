@@ -576,3 +576,67 @@ API возвращает `[]`, чтобы дашборд не падал без 
 `docker compose up`, иначе Docker создаст на их месте каталоги (тогда `load_calendar`
 по `is_file()` просто отключит календарь). Не используешь календарь — закомментируй
 эти две строки volume.
+
+---
+
+## 10. Action Log & Undo (дизайн)
+
+Каждое изменение данных через бота журналируется, чтобы его можно было отменить
+голосом/текстом («отмени», «отмени последнее»). Реализовано: `logger.py`
+(`ActionLog`, SQLite — в стиле `tasks.py`/`bills.py`), логирование внутри
+`IntentRouter.execute`, intent `undo_last`.
+
+### Таблица `action_log`
+
+| поле | назначение |
+|---|---|
+| `id` | автоинкремент, порядок = свежесть |
+| `timestamp` | UTC ISO, когда выполнено |
+| `source` | откуда (`telegram` и т.п.) |
+| `entity_type` | `task` / `bill` / `calendar_event` |
+| `entity_id` | id затронутой сущности (TEXT: id задач/платежей — int, событий — str) |
+| `action` | `create` / `update` / `delete` / `mark_paid` |
+| `before_state` | состояние ДО (JSON, `null` для create) |
+| `after_state` | состояние ПОСЛЕ (JSON, `null` для delete) |
+| `raw_message` | исходный текст пользователя |
+| `status` | `active` / `undone` |
+
+### Где снимается состояние
+
+Логирование живёт в **одном месте — обёртке `IntentRouter.execute`** (не размазано
+по веткам). `execute` делит работу с `_apply` (само действие → возвращает
+`(ответ, entity_id, after_state, ok)`): до мутации снимается `before_state`
+(`_read_entity`), после — `after_state`, затем `log_action`. Таблица `_LOGGED`
+сопоставляет `action.type` → `(entity_type, action)`; `query_*` и реверсы отмены в
+ней отсутствуют и не журналируются. Для календаря `before_state` берётся через
+`CalendarClient.get_event` (datetime → ISO в `_event_state`).
+
+### intent `undo_last`
+
+`_resolve_undo`: берём самую свежую запись `status='active'`, строим обратное
+действие (`_build_reverse`) и помечаем запись `undone`. Реверс по `action`:
+
+| было | реверс |
+|---|---|
+| `create` | удалить сущность (`delete_task` / `delete_event`) |
+| `update` | восстановить `before_state` (`restore_task` PATCH-ит поля; `move_event` возвращает на прежнее время) |
+| `delete` | пересоздать из `before_state` (`create_task` / `create_event`; новый id — допустимо) |
+| `mark_paid` | вернуть прежний статус (`set_bill_status` → `pending`) |
+
+**Гашение записи, а не новая запись.** Обратное действие несёт служебный
+`_undo_log_id`; `execute`, увидев его, выполняет реверс, помечает исходную запись
+`undone` и **не пишет новую** — иначе повторный `undo_last` откатывал бы сам откат.
+Так повторный `undo_last` берёт следующую по свежести `active`-запись и откатывает
+**другое** действие, а не одно дважды.
+
+**Календарь — через подтверждение.** Если `entity_type='calendar_event'`, реверс
+возвращается как `Resolution('confirm', …)` — проходит через Да/Нет, как любое
+изменение календаря (§9). Для `task`/`bill` отмена выполняется сразу (`execute`).
+
+### Хранение
+
+`actions.db` рядом с `tasks.db`/`bills.db`: путь в `config.ACTION_LOG_DB_PATH`,
+bind-mount в `docker-compose.yml` (те же грабли одиночного файла — `touch actions.db`
+до `docker compose up`), в `.gitignore`. Веб-дашборд правит задачи/платежи напрямую
+через стора (минуя `IntentRouter`) — эти изменения **не** журналируются и отмене не
+подлежат; undo покрывает только действия через бота.

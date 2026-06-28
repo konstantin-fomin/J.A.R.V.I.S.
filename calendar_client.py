@@ -109,6 +109,28 @@ class CalendarClient:
             )
         return events
 
+    def get_event(self, event_id) -> dict | None:
+        """Одна встреча по id (или None, если не найдена/удалена). Нужно для
+        снимка before_state в журнале действий перед переносом/удалением."""
+        from googleapiclient.errors import HttpError
+
+        try:
+            item = (
+                self._get_service()
+                .events()
+                .get(calendarId="primary", eventId=event_id)
+                .execute()
+            )
+        except HttpError:
+            return None
+        return {
+            "id": item["id"],
+            "title": item.get("summary", "(без названия)"),
+            "start": _parse_google_dt(item["start"], self._tz),
+            "end": _parse_google_dt(item["end"], self._tz),
+            "html_link": item.get("htmlLink", ""),
+        }
+
     def create_event(self, title, start, end) -> dict:
         body = {
             "summary": title,

@@ -18,6 +18,7 @@ from memory.chroma import ChromaIndex
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from bills import BillStore
+from logger import ActionLog
 from memory.obsidian import ObsidianVault
 from tasks import TaskStore
 from web.server import create_app
@@ -69,6 +70,7 @@ def main() -> None:
     facts = FactExtractor(llm, memory)
     tasks_store = TaskStore(config.TASKS_DB_PATH)
     bills_store = BillStore(config.BILLS_DB_PATH)
+    action_log = ActionLog(config.ACTION_LOG_DB_PATH)
     # Календарь опционален: None, если нет credentials.json/token.json
     calendar = load_calendar()
     logger.info("Google Calendar: %s", "подключён" if calendar else "не настроен (token.json нет)")
@@ -82,7 +84,7 @@ def main() -> None:
     )
     bot_thread = threading.Thread(
         target=run_bot_in_thread,
-        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store, calendar),
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store, calendar, action_log),
         daemon=True,
         name="telegram-polling",
     )

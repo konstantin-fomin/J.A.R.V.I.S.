@@ -32,7 +32,21 @@ INTENTS = {
     "move_event",
     "delete_event",
     "query_events",
+    "undo_last",
     "none",
+}
+
+# Какие типы действий журналируются и как: action.type → (entity_type, action в журнале).
+# Всё, что меняет данные, проходит через одно место (IntentRouter.execute) и
+# попадает сюда. query_* и реверсы undo здесь отсутствуют — они не логируются.
+_LOGGED = {
+    "create_task": ("task", "create"),
+    "complete_task": ("task", "update"),
+    "delete_task": ("task", "delete"),
+    "mark_bill_paid": ("bill", "mark_paid"),
+    "create_event": ("calendar_event", "create"),
+    "move_event": ("calendar_event", "update"),
+    "delete_event": ("calendar_event", "delete"),
 }
 
 PROMPT = """Ты — парсер намерений личного ассистента. Определи, что пользователь \
@@ -51,6 +65,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - move_event — перенести встречу на другое время. Поля: title_hint, date (новая дата), start_time (новое время).
 - delete_event — удалить встречу из календаря. Поле: title_hint.
 - query_events — показать встречи. Поле: filter ("today"|"week"|null).
+- undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
 Правила:
@@ -142,10 +157,11 @@ class Resolution:
 class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
-    def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None):
+    def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None, action_log=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
+        self.log = action_log     # ActionLog | None — журнал для undo_last
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -174,6 +190,9 @@ class IntentRouter:
 
         if intent == "none":
             return Resolution("chat")
+
+        if intent == "undo_last":
+            return self._resolve_undo()
 
         if intent == "create_task":
             title = str(data.get("title") or "").strip()
@@ -251,6 +270,83 @@ class IntentRouter:
         if low_confidence:
             return Resolution("confirm", action=action, label=label)
         return Resolution("execute", action=action)
+
+    # --- Отмена последнего действия (undo_last) ------------------------------
+    # Берём самую свежую запись журнала status='active', строим обратное
+    # действие и помечаем запись undone (это делает execute по маркеру
+    # _undo_log_id). Повторный undo_last возьмёт следующую active-запись.
+    # Календарь реверсируется через Да/Нет (как любое изменение календаря);
+    # task/bill — выполняются сразу.
+
+    def _resolve_undo(self) -> Resolution:
+        if self.log is None:
+            return Resolution("message", text="Журнал действий не ведётся — отменять нечего.")
+        rec = self.log.latest_active()
+        if rec is None:
+            return Resolution("message", text="Нечего отменять.")
+        reverse = self._build_reverse(rec)
+        if reverse is None:
+            return Resolution("message", text="Не знаю, как отменить это действие 🤔")
+        reverse["_undo_log_id"] = rec["id"]
+        if rec["entity_type"] == "calendar_event":
+            # изменения календаря всегда подтверждаем кнопками
+            return Resolution("confirm", action=reverse, label=self._undo_label(rec))
+        return Resolution("execute", action=reverse)
+
+    @staticmethod
+    def _build_reverse(rec: dict) -> dict | None:
+        """Обратное действие для записи журнала (или None, если реверс неизвестен)."""
+        et, act = rec["entity_type"], rec["action"]
+        before, after = rec.get("before_state"), rec.get("after_state")
+        eid = rec["entity_id"]
+
+        if et == "task":
+            if act == "create":  # создали → удаляем
+                return {"type": "delete_task", "task_id": int(eid),
+                        "title": (after or {}).get("title", "")}
+            if act == "update" and before is not None:  # изменили → восстановить before
+                fields = {k: before.get(k) for k in
+                          ("title", "description", "status", "priority", "due_date", "due_time")}
+                return {"type": "restore_task", "task_id": int(eid),
+                        "fields": fields, "title": before.get("title", "")}
+            if act == "delete" and before is not None:  # удалили → создаём заново (новый id — ок)
+                params = {k: before[k] for k in
+                          ("title", "description", "due_date", "due_time", "priority", "source")
+                          if before.get(k) is not None}
+                return {"type": "create_task", "params": params}
+
+        if et == "bill":
+            if act == "mark_paid":  # оплачено → вернуть прежний статус (pending)
+                status = (before or {}).get("status") or "pending"
+                name = (before or after or {}).get("name", "")
+                return {"type": "set_bill_status", "instance_id": int(eid),
+                        "status": status, "name": name}
+
+        if et == "calendar_event":
+            if act == "create":  # создали встречу → удаляем
+                return {"type": "delete_event", "event_id": eid,
+                        "title": (after or {}).get("title", "")}
+            if act == "update" and before is not None:  # перенесли → возвращаем на прежнее время
+                return {"type": "move_event", "event_id": eid,
+                        "title": before.get("title", ""),
+                        "start": before["start"], "end": before["end"]}
+            if act == "delete" and before is not None:  # удалили встречу → создаём заново
+                return {"type": "create_event", "title": before.get("title", ""),
+                        "start": before["start"], "end": before["end"]}
+
+        return None
+
+    @staticmethod
+    def _undo_label(rec: dict) -> str:
+        """Человекочитаемое описание для подтверждения отмены календарного действия."""
+        after, before = rec.get("after_state") or {}, rec.get("before_state") or {}
+        title = after.get("title") or before.get("title") or "встречу"
+        descr = {
+            "create": f"удалить встречу «{title}» (она была создана)",
+            "update": f"вернуть встречу «{title}» на прежнее время",
+            "delete": f"восстановить встречу «{title}»",
+        }.get(rec["action"], f"отменить действие со встречей «{title}»")
+        return f"отменить последнее действие — {descr}?"
 
     # --- Календарь -----------------------------------------------------------
     # ВСЕ изменения календаря (create/move/delete) идут через подтверждение
@@ -368,6 +464,40 @@ class IntentRouter:
         return f"{start.strftime('%d.%m %H:%M')}–{end.strftime('%d.%m %H:%M')}"
 
     def execute(self, action: dict) -> str:
+        """Единая точка выполнения действия. Все мутации (см. _LOGGED) журналируются
+        здесь: before_state снимается до изменения, after_state — после, чтобы их
+        можно было отменить через undo_last.
+
+        Реверс самой отмены (несёт _undo_log_id) новую запись не пишет, а помечает
+        исходную undone — иначе повторный undo откатывал бы сам откат."""
+        # Служебные ключи журнала вынимаем, чтобы не мешали логике действия.
+        raw_message = action.pop("raw_message", None)
+        source = action.pop("source", "telegram")
+        undo_log_id = action.pop("_undo_log_id", None)
+        meta = _LOGGED.get(action["type"])
+
+        # Снимок состояния ДО мутации (для update/delete/mark_paid; у create — None).
+        before = None
+        if meta and self.log is not None and undo_log_id is None and meta[1] != "create":
+            before = self._read_entity(meta[0], action)
+
+        reply, entity_id, after, ok = self._apply(action)
+
+        if self.log is not None and ok:
+            if undo_log_id is not None:
+                self.log.mark_undone(undo_log_id)
+                reply = f"↩️ Отменил последнее действие.\n{reply}"
+            elif meta is not None:
+                self.log.log_action(
+                    source=source, entity_type=meta[0], entity_id=entity_id,
+                    action=meta[1], before_state=before, after_state=after,
+                    raw_message=raw_message,
+                )
+        return reply
+
+    def _apply(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
+        """Выполняет действие. Возвращает (ответ, entity_id, after_state, ok).
+        ok=False для read-only (query_*) и неуспешных действий — их не журналируем."""
         kind = action["type"]
         if kind == "create_task":
             task = self.tasks.create(**action["params"])
@@ -375,22 +505,28 @@ class IntentRouter:
             if task["due_date"]:
                 due = f" на {task['due_date']}" + (f" {task['due_time']}" if task["due_time"] else "")
             priority = " (важно)" if task["priority"] == "high" else ""
-            return f"✅ Создал задачу: «{task['title']}»{due}{priority}"
+            return f"✅ Создал задачу: «{task['title']}»{due}{priority}", str(task["id"]), task, True
         if kind == "complete_task":
-            self.tasks.update(action["task_id"], status="done")
-            return f"✅ Отметил выполненной: «{action['title']}»"
+            after = self.tasks.update(action["task_id"], status="done")
+            return f"✅ Отметил выполненной: «{action['title']}»", str(action["task_id"]), after, True
+        if kind == "restore_task":  # реверс undo: вернуть прежние поля задачи
+            after = self.tasks.update(action["task_id"], **action["fields"])
+            return f"↩️ Вернул задачу «{action['title']}»", str(action["task_id"]), after, True
         if kind == "delete_task":
             self.tasks.delete(action["task_id"])
-            return f"🗑 Удалил задачу: «{action['title']}»"
+            return f"🗑 Удалил задачу: «{action['title']}»", str(action["task_id"]), None, True
         if kind == "query_tasks":
             if action.get("filter") == "today":
                 items = self.tasks.list(due_date=date.today().isoformat())
             else:
                 items = self.tasks.list()
-            return format_tasks(items)
+            return format_tasks(items), None, None, False
         if kind == "mark_bill_paid":
-            self.bills.set_status(action["instance_id"], "paid")
-            return f"✅ Платёж «{action['name']}» отмечен оплаченным"
+            after = self.bills.set_status(action["instance_id"], "paid")
+            return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True
+        if kind == "set_bill_status":  # реверс undo: вернуть платёж в прежний статус
+            after = self.bills.set_status(action["instance_id"], action["status"])
+            return f"↩️ Платёж «{action['name']}» снова в ожидании", str(action["instance_id"]), after, True
         if kind == "query_bills":
             from bot.handlers import format_bills  # отложенный импорт: bot.handlers импортирует этот модуль
 
@@ -398,37 +534,64 @@ class IntentRouter:
             self.bills.ensure_month(ym)
             items = self.bills.list_instances(ym)
             if not items:
-                return "На этот месяц начислений нет."
-            return format_bills(items, f"💳 Платежи за {ym}:")
+                return "На этот месяц начислений нет.", None, None, False
+            return format_bills(items, f"💳 Платежи за {ym}:"), None, None, False
 
         if kind in ("create_event", "move_event", "delete_event", "query_events"):
             return self._execute_calendar(action)
 
-        return "Не понял действие 🤔"
+        return "Не понял действие 🤔", None, None, False
 
-    def _execute_calendar(self, action: dict) -> str:
+    def _execute_calendar(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
         assert self.calendar is not None  # сюда не попадаем без настроенного календаря
         kind = action["type"]
         try:
             if kind == "create_event":
                 start = datetime.fromisoformat(action["start"])
                 end = datetime.fromisoformat(action["end"])
-                self.calendar.create_event(action["title"], start, end)
-                return f"📅 Создал встречу: «{action['title']}» {self._fmt_span(start, end)}"
+                ev = self.calendar.create_event(action["title"], start, end)
+                after = {"id": ev["id"], "title": action["title"],
+                         "start": action["start"], "end": action["end"]}
+                return (f"📅 Создал встречу: «{action['title']}» {self._fmt_span(start, end)}",
+                        str(ev["id"]), after, True)
             if kind == "move_event":
                 start = datetime.fromisoformat(action["start"])
                 end = datetime.fromisoformat(action["end"])
                 self.calendar.update_event(action["event_id"], start=start, end=end)
-                return f"📅 Перенёс «{action['title']}» на {self._fmt_span(start, end)}"
+                after = {"title": action["title"], "start": action["start"], "end": action["end"]}
+                return (f"📅 Перенёс «{action['title']}» на {self._fmt_span(start, end)}",
+                        str(action["event_id"]), after, True)
             if kind == "delete_event":
                 self.calendar.delete_event(action["event_id"])
-                return f"🗑 Удалил встречу: «{action['title']}»"
+                return f"🗑 Удалил встречу: «{action['title']}»", str(action["event_id"]), None, True
             if kind == "query_events":
-                return self._query_events(action.get("filter"))
+                return self._query_events(action.get("filter")), None, None, False
         except Exception:
             logger.exception("Действие календаря %s упало", kind)
-            return "Не удалось выполнить действие с календарём 😔 Проверь, что token.json настроен."
-        return "Не понял действие 🤔"
+            return ("Не удалось выполнить действие с календарём 😔 Проверь, что token.json настроен.",
+                    None, None, False)
+        return "Не понял действие 🤔", None, None, False
+
+    def _read_entity(self, entity_type: str, action: dict) -> dict | None:
+        """Снимок текущего состояния сущности ДО мутации (для before_state)."""
+        if entity_type == "task":
+            return self.tasks.get(action["task_id"])
+        if entity_type == "bill":
+            return self.bills.get_instance(action["instance_id"])
+        if entity_type == "calendar_event":
+            assert self.calendar is not None
+            return self._event_state(self.calendar.get_event(action["event_id"]))
+        return None
+
+    @staticmethod
+    def _event_state(ev: dict | None) -> dict | None:
+        """Событие календаря → JSON-safe dict (datetime → ISO-строка) для журнала."""
+        if ev is None:
+            return None
+        def iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else v
+        return {"id": ev.get("id"), "title": ev.get("title"),
+                "start": iso(ev["start"]), "end": iso(ev["end"])}
 
     def _query_events(self, filt) -> str:
         assert self.calendar is not None

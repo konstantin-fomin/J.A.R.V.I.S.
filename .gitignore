@@ -12,6 +12,9 @@ tasks.db-wal
 bills.db
 bills.db-journal
 bills.db-wal
+actions.db
+actions.db-journal
+actions.db-wal
 K:/OBSIDIAN/
 
 # Python
