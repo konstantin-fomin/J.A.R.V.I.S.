@@ -35,8 +35,12 @@ calendar_client.py  Google Calendar (опц., token.json); voice.py — голо
 ```
 
 Все мутации (tasks/bills/calendar/contacts) проходят через `IntentRouter.execute`,
-логируются в `ActionLog` и отменяемы через `undo_last`. Ежедневные job'ы (платежи,
-ДР, проактивные подсказки) и напоминания о встречах — в `bot/telegram_bot.py`.
+логируются в `ActionLog` и отменяемы через `undo_last` (`edit_last` правит одно поле
+последнего действия — тоже как обычный update, отменяем). Выполнить сразу или
+переспросить — решает декларативная таблица `RISK_LEVELS` (safe/medium/dangerous) в
+начале `intents.py` через единый шлюз `_gate`, а не разрозненные `if` (§17). Ежедневные
+job'ы (платежи, ДР, проактивные подсказки) и напоминания о встречах — в
+`bot/telegram_bot.py`.
 
 ## Команды
 
