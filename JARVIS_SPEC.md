@@ -737,3 +737,69 @@ bind-mount в `docker-compose.yml` (те же грабли одиночного 
   упадёт, уходит обычное напоминание без заметок (память не должна ломать
   будильник).
 - **`config.py`:** `MEMORY_RELEVANCE_MAX_DISTANCE`, `PREMEETING_NOTES_COUNT`.
+
+## 14. CRM — контакты (дизайн)
+
+Лёгкий персональный CRM: помнить людей, когда последний раз общались и когда у
+них день рождения. Один пользователь, никакой иерархии компаний/сделок — только
+люди и пара дат. Хранилище — отдельная SQLite-база (как tasks/bills), без ORM.
+
+### Зачем
+
+- Не забывать поздравить с днём рождения (проактивное напоминание за N дней).
+- Видеть, с кем давно не общался («покажи контакты»).
+- Держать короткие заметки про человека (где работает, как зовут детей и т.п.).
+
+### Хранение — `contacts.py`
+
+Одна таблица `contacts` (создаётся при первом обращении):
+
+| поле                | тип   | смысл                                        |
+|---------------------|-------|----------------------------------------------|
+| `id`                | INT PK| автоинкремент                                |
+| `name`              | TEXT  | имя (обязательно)                            |
+| `last_contact_date` | TEXT? | ISO `ГГГГ-ММ-ДД`, когда последний раз общались|
+| `birthday`          | TEXT? | ISO `ГГГГ-ММ-ДД`; год хранится, но для «скоро ДР» сравниваем месяц-день |
+| `notes`             | TEXT? | свободные заметки                            |
+| `created_at`        | TEXT  | ISO-таймстамп                                |
+| `updated_at`        | TEXT  | ISO-таймстамп                                |
+
+Методы: `create / get / list / update / delete` (как в tasks.py) + `find(name_hint)`
+— подстрочный регистронезависимый матч по имени (склонения нормализует парсер
+интентов, возвращая имя в именительном падеже, ровно как `title_hint`).
+
+Дни рождения повторяются ежегодно, поэтому чистая функция `days_until_birthday(
+birthday, today)` считает число дней до ближайшей годовщины (год игнорируется;
+29 февраля в невисокосный год отмечаем 1 марта). `upcoming_birthdays(within_days,
+today)` отдаёт контакты с ДР в окне `[0, within_days]`.
+
+### Intents (через тот же `IntentRouter`)
+
+- **`create_contact`** — добавить человека. Поля: `name`, `birthday?`, `note?`.
+- **`update_contact`** — находит по `name_hint`; ставит `last_contact_date = сегодня`
+  и/или дописывает `notes` (триггеры: «созвонился с…», «виделся с…», «заметка про…»).
+- **`query_contacts`** — `filter`: `upcoming_birthdays` (ближайшие ДР) | `by_name`
+  (поиск по `name`) | пусто (все). Read-only — выполняется сразу, без подтверждения.
+- **`delete_contact`** — находит по `name_hint`, удаляет **через подтверждение Да/Нет**
+  (как любое удаление: tasks/события).
+
+### Проводка и Undo
+
+Все мутации идут через `IntentRouter.execute` → попадают в Action Log с
+`entity_type = "contact"` (`create_contact`→create, `update_contact`→update,
+`delete_contact`→delete). Реверсы (`_build_reverse`): create→delete,
+update→`restore_contact` (вернуть прежние поля), delete→`create_contact` (создать
+заново; новый id — норма). Значит `undo_last` работает и для контактов.
+
+### Напоминание о ДР — `bot/telegram_bot.py`
+
+Ежедневный job `birthday_reminder` (стиль `remind_bills`/`remind_events`, тот же
+APScheduler `run_daily`): берёт `contacts.upcoming_birthdays(within_days=
+config.BIRTHDAY_REMINDER_LEAD_DAYS)` и, если есть, шлёт одно сообщение со списком
+(«сегодня / завтра / через N дн»). Окно для запроса «у кого скоро ДР» шире, чем
+для напоминания (по умолчанию 30 vs 3 дня).
+
+### `config.py`
+
+`CONTACTS_DB_PATH`, `BIRTHDAY_REMINDER_TIME`, `BIRTHDAY_REMINDER_LEAD_DAYS` (3).
+`contacts.db` — bind-mount в docker-compose (как tasks/bills/actions/inbox).

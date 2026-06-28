@@ -137,6 +137,7 @@ class Handlers:
         action_log=None,
         inbox=None,
         suggestlog=None,
+        contacts=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -146,7 +147,8 @@ class Handlers:
         self.calendar = calendar
         self.inbox = inbox
         self.suggestlog = suggestlog  # SuggestionLog | None — лог проактивных подсказок
-        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox)
+        self.contacts = contacts      # ContactStore | None — лёгкий CRM
+        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):

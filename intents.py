@@ -34,9 +34,17 @@ INTENTS = {
     "query_events",
     "query_by_project",
     "capture",
+    "create_contact",
+    "update_contact",
+    "query_contacts",
+    "delete_contact",
     "undo_last",
     "none",
 }
+
+# Окно (дней) для запроса «у кого скоро ДР» — шире, чем у ежедневного напоминания
+# (config.BIRTHDAY_REMINDER_LEAD_DAYS), чтобы «покажи ближайшие ДР» давал обзор.
+CONTACT_QUERY_BIRTHDAY_DAYS = 30
 
 # Какие типы действий журналируются и как: action.type → (entity_type, action в журнале).
 # Всё, что меняет данные, проходит через одно место (IntentRouter.execute) и
@@ -49,6 +57,9 @@ _LOGGED = {
     "create_event": ("calendar_event", "create"),
     "move_event": ("calendar_event", "update"),
     "delete_event": ("calendar_event", "delete"),
+    "create_contact": ("contact", "create"),
+    "update_contact": ("contact", "update"),
+    "delete_contact": ("contact", "delete"),
 }
 
 PROMPT = """Ты — парсер намерений личного ассистента. Определи, что пользователь \
@@ -69,13 +80,17 @@ PROMPT = """Ты — парсер намерений личного ассист
 - query_events — показать встречи. Поле: filter ("today"|"week"|null).
 - query_by_project — показать задачи по теме/проекту («что у меня по X», «покажи задачи по проекту X»). Поле: project (название темы).
 - capture — записать мысль в инбокс (быстрый захват без разбора). Поле: note (что записать).
+- create_contact — добавить человека в контакты («добавь контакт …», «запомни …»). Поля: name (имя), birthday ("ГГГГ-ММ-ДД" или null), note (заметка про человека или null).
+- update_contact — отметить, что пообщался с человеком, и/или дописать заметку («созвонился с …», «виделся с …», «заметка про …»). Поля: name_hint (кто), note (что дописать или null). last_contact_date выставится на сегодня автоматически.
+- query_contacts — показать контакты. Поле: filter ("upcoming_birthdays" — у кого скоро день рождения | "by_name" — поиск по имени | null — все). Для by_name заполни name.
+- delete_contact — удалить контакт. Поле: name_hint.
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - none — это обычное сообщение/вопрос/разговор, а не команда.
 
 Правила:
 - Большинство сообщений — обычный разговор (none). Выбирай действие только если пользователь явно о нём просит.
 - title_hint/name_hint — это нечёткие слова пользователя для поиска по подстроке, НЕ точный id.
-- title_hint/name_hint/project возвращай в начальной форме (именительный падеж, единственное число): «квартиру»→«квартира», «задачу полить кактусы»→«полить кактус», «по ремонту»→«ремонт». Это нужно для поиска по подстроке.
+- title_hint/name_hint/project возвращай в начальной форме (именительный падеж, единственное число): «квартиру»→«квартира», «задачу полить кактусы»→«полить кактус», «по ремонту»→«ремонт», «с мамой»→«мама». Это нужно для поиска по подстроке.
 - project в create_task заполняй ТОЛЬКО если пользователь явно называет тему/проект («задача по ремонту», «для проекта лендинг»); иначе null.
 - capture — это явный захват в инбокс. Срабатывает ТОЛЬКО на явный триггер: «запиши в инбокс», «в инбокс», «на заметку», «потом разберу», «закинь в инбокс». Без такого триггера это НЕ capture (обычная мысль/идея без триггера → none, конкретное дело → create_task). note — текст записи без самого триггера.
 - Относительные даты («завтра», «в пятницу», «через неделю») переводи в due_date/date относительно «сегодня».
@@ -84,7 +99,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -144,6 +159,18 @@ def format_events(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_contacts(items: list[dict], header: str) -> str:
+    """Список контактов для query_contacts: имя + ДР + дата последнего контакта."""
+    if not items:
+        return "Контактов нет."
+    lines = [header, ""]
+    for c in items:
+        bday = f" 🎂 {c['birthday']}" if c["birthday"] else ""
+        last = f" · последний контакт {c['last_contact_date']}" if c["last_contact_date"] else ""
+        lines.append(f"👤 {c['name']}{bday}{last}")
+    return "\n".join(lines)
+
+
 @dataclass
 class Resolution:
     """Что бот должен сделать с разобранным намерением.
@@ -164,12 +191,13 @@ class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
     def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None,
-                 action_log=None, inbox=None):
+                 action_log=None, inbox=None, contacts=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
         self.log = action_log     # ActionLog | None — журнал для undo_last
         self.inbox = inbox        # InboxStore | None — быстрый захват
+        self.contacts = contacts  # ContactStore | None — лёгкий CRM
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -277,6 +305,11 @@ class IntentRouter:
                 {"type": "capture", "text": note}, f"записать в инбокс «{note}»?", low
             )
 
+        if intent in ("create_contact", "update_contact", "query_contacts", "delete_contact"):
+            if self.contacts is None:
+                return Resolution("message", text="Контакты не настроены 🤔")
+            return self._resolve_contact(intent, data, low)
+
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:
                 return Resolution(
@@ -293,6 +326,107 @@ class IntentRouter:
         if low_confidence:
             return Resolution("confirm", action=action, label=label)
         return Resolution("execute", action=action)
+
+    # --- Контакты (лёгкий CRM, §14) ------------------------------------------
+    # create/update — auto-or-confirm (как задачи); delete — всегда Да/Нет;
+    # query_contacts — read-only, выполняется сразу. Все мутации логируются
+    # (entity_type=contact) и отменяемы через undo_last.
+
+    def _resolve_contact(self, intent: str, data: dict, low: bool) -> Resolution:
+        assert self.contacts is not None  # resolve() гарантирует контакты до вызова
+
+        if intent == "create_contact":
+            name = str(data.get("name") or "").strip()
+            if not name:
+                return Resolution("chat")  # некого добавлять — обычный разговор
+            params = {"name": name}
+            if data.get("birthday"):
+                params["birthday"] = data["birthday"]
+            if data.get("note"):
+                params["notes"] = data["note"]
+            return self._auto_or_confirm(
+                {"type": "create_contact", "params": params}, f"добавить контакт «{name}»?", low
+            )
+
+        if intent == "update_contact":
+            hint = data.get("name_hint") or data.get("name")
+            single = self._single_contact(self.contacts.find(hint), hint)
+            if isinstance(single, Resolution):
+                return single
+            # сам факт «пообщался с X» проставляет дату последнего контакта
+            fields = {"last_contact_date": date.today().isoformat()}
+            note = str(data.get("note") or "").strip()
+            if note:  # заметку дописываем к существующей, а не затираем
+                existing = (single.get("notes") or "").strip()
+                fields["notes"] = f"{existing}\n{note}" if existing else note
+            return self._auto_or_confirm(
+                {"type": "update_contact", "contact_id": single["id"],
+                 "name": single["name"], "fields": fields},
+                f"обновить контакт «{single['name']}»?", low,
+            )
+
+        if intent == "delete_contact":
+            hint = data.get("name_hint") or data.get("name")
+            single = self._single_contact(self.contacts.find(hint), hint)
+            if isinstance(single, Resolution):
+                return single
+            return Resolution(
+                "confirm",
+                action={"type": "delete_contact", "contact_id": single["id"], "name": single["name"]},
+                label=f"удалить контакт «{single['name']}»?",
+            )
+
+        if intent == "query_contacts":
+            return Resolution("execute", action={"type": "query_contacts",
+                                                 "filter": data.get("filter"),
+                                                 "name": data.get("name")})
+        return Resolution("chat")
+
+    @staticmethod
+    def _single_contact(matches: list[dict], hint: str | None):
+        """Один матч → dict контакта; иначе Resolution('message') с пояснением."""
+        if not matches:
+            return Resolution("message", text=f"Не нашёл контакт похожий на «{(hint or '').strip()}».")
+        if len(matches) > 1:
+            names = ", ".join(f"«{c['name']}»" for c in matches[:5])
+            return Resolution("message", text=f"Нашёл несколько контактов: {names}. Уточни, кого именно.")
+        return matches[0]
+
+    def _apply_contact(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
+        """Выполняет действие над контактом. Сюда не попадаем без настроенных
+        контактов (resolve гарантирует), поэтому assert, а не мягкий guard."""
+        assert self.contacts is not None
+        kind = action["type"]
+        if kind == "create_contact":
+            c = self.contacts.create(**action["params"])
+            bday = f" (др {c['birthday']})" if c["birthday"] else ""
+            return f"✅ Добавил контакт: «{c['name']}»{bday}", str(c["id"]), c, True
+        if kind == "update_contact":
+            after = self.contacts.update(action["contact_id"], **action["fields"])
+            return f"✅ Обновил контакт «{action['name']}»", str(action["contact_id"]), after, True
+        if kind == "restore_contact":  # реверс undo: вернуть прежние поля контакта
+            after = self.contacts.update(action["contact_id"], **action["fields"])
+            return f"↩️ Вернул контакт «{action['name']}»", str(action["contact_id"]), after, True
+        if kind == "delete_contact":
+            self.contacts.delete(action["contact_id"])
+            return f"🗑 Удалил контакт: «{action['name']}»", str(action["contact_id"]), None, True
+        # query_contacts — read-only
+        return self._query_contacts(action), None, None, False
+
+    def _query_contacts(self, action: dict) -> str:
+        assert self.contacts is not None
+        filt = action.get("filter")
+        if filt == "upcoming_birthdays":
+            items = self.contacts.upcoming_birthdays(CONTACT_QUERY_BIRTHDAY_DAYS)
+            return format_contacts(items, "🎂 Скоро дни рождения:") if items else \
+                "Ближайших дней рождения нет."
+        if filt == "by_name":
+            items = self.contacts.find(action.get("name"))
+            name = (action.get("name") or "").strip()
+            return format_contacts(items, f"👤 Контакты по «{name}»:") if items else \
+                f"Не нашёл контактов по «{name}»."
+        items = self.contacts.list()
+        return format_contacts(items, "👤 Контакты:")
 
     # --- Отмена последнего действия (undo_last) ------------------------------
     # Берём самую свежую запись журнала status='active', строим обратное
@@ -344,6 +478,20 @@ class IntentRouter:
                 name = (before or after or {}).get("name", "")
                 return {"type": "set_bill_status", "instance_id": int(eid),
                         "status": status, "name": name}
+
+        if et == "contact":
+            if act == "create":  # создали → удаляем
+                return {"type": "delete_contact", "contact_id": int(eid),
+                        "name": (after or {}).get("name", "")}
+            if act == "update" and before is not None:  # изменили → восстановить before
+                fields = {k: before.get(k) for k in
+                          ("name", "last_contact_date", "birthday", "notes")}
+                return {"type": "restore_contact", "contact_id": int(eid),
+                        "fields": fields, "name": before.get("name", "")}
+            if act == "delete" and before is not None:  # удалили → создаём заново (новый id — ок)
+                params = {k: before[k] for k in ("name", "last_contact_date", "birthday", "notes")
+                          if before.get(k) is not None}
+                return {"type": "create_contact", "params": params}
 
         if et == "calendar_event":
             if act == "create":  # создали встречу → удаляем
@@ -558,6 +706,9 @@ class IntentRouter:
                 return "Инбокс не настроен 🤔", None, None, False
             item = self.inbox.create(action["text"], source="telegram")
             return f"📥 Записал в инбокс: «{item['text']}»", None, None, False
+        if kind in ("create_contact", "update_contact", "restore_contact",
+                    "delete_contact", "query_contacts"):
+            return self._apply_contact(action)
         if kind == "mark_bill_paid":
             after = self.bills.set_status(action["instance_id"], "paid")
             return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True
@@ -615,6 +766,9 @@ class IntentRouter:
             return self.tasks.get(action["task_id"])
         if entity_type == "bill":
             return self.bills.get_instance(action["instance_id"])
+        if entity_type == "contact":
+            assert self.contacts is not None
+            return self.contacts.get(action["contact_id"])
         if entity_type == "calendar_event":
             assert self.calendar is not None
             return self._event_state(self.calendar.get_event(action["event_id"]))

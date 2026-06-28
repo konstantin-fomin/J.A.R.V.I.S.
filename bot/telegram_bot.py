@@ -26,6 +26,7 @@ from bot.handlers import (
     format_bills,
 )
 from calendar_client import events_to_remind
+from contacts import ContactStore, days_until_birthday
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -39,6 +40,9 @@ BILLS_REMINDER_TIME = time(hour=9, minute=0)
 
 # Время ежедневной проверки журнала на повторяющиеся темы (§13).
 SUGGEST_REMINDER_TIME = time(hour=10, minute=0)
+
+# Время ежедневной проверки ближайших дней рождения (§14).
+BIRTHDAY_REMINDER_TIME = time(hour=9, minute=30)
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
@@ -131,6 +135,25 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в день: если у кого-то из контактов ДР в ближайшие N дней — напомнить (§14)."""
+    contacts: ContactStore = context.job.data
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        logger.warning("ALLOWED_USER_ID не задан — некому слать напоминание о ДР")
+        return
+    today = date.today()
+    upcoming = contacts.upcoming_birthdays(config.BIRTHDAY_REMINDER_LEAD_DAYS, today)
+    if not upcoming:
+        return
+    lines = ["🎂 Скоро дни рождения:", ""]
+    for c in upcoming:
+        days = days_until_birthday(date.fromisoformat(c["birthday"]), today)
+        when = "сегодня" if days == 0 else ("завтра" if days == 1 else f"через {days} дн")
+        lines.append(f"• {c['name']} — {when}")
+    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+
+
 async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в день: ищет в журнале повторяющиеся темы и предлагает превратить их
     в задачу (§13). Для каждой темы — отдельное сообщение с кнопками Да/Нет.
@@ -175,6 +198,7 @@ def build_application(
     calendar=None,
     action_log=None,
     inbox=None,
+    contacts=None,
 ) -> Application:
     # Проактивные подсказки (§13): лог общий для job (показ/пометка) и хендлеров
     # (кнопка «Да» достаёт формулировку темы по hash). Тема формулируется LLM.
@@ -188,7 +212,8 @@ def build_application(
         min_cluster=config.SUGGEST_MIN_CLUSTER,
         repeat_block_days=config.SUGGEST_REPEAT_BLOCK_DAYS,
     )
-    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox, suggest_log)
+    handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox,
+                        suggest_log, contacts)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -215,6 +240,12 @@ def build_application(
             suggest_from_notes, time=SUGGEST_REMINDER_TIME, data=suggester,
             name="suggest_from_notes",
         )
+        # Ежедневное напоминание о ближайших днях рождения — если контакты настроены
+        if contacts is not None:
+            app.job_queue.run_daily(
+                birthday_reminder, time=BIRTHDAY_REMINDER_TIME, data=contacts,
+                name="birthday_reminder",
+            )
         # Напоминания о встречах — только если календарь настроен
         if calendar is not None:
             app.job_queue.run_repeating(
@@ -242,9 +273,11 @@ def run_bot(
     calendar=None,
     action_log=None,
     inbox=None,
+    contacts=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
-    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log, inbox).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
+                      inbox, contacts).run_polling(
         drop_pending_updates=True
     )
 
@@ -259,11 +292,13 @@ def run_bot_in_thread(
     calendar=None,
     action_log=None,
     inbox=None,
+    contacts=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log, inbox).run_polling(
+    build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
+                      inbox, contacts).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

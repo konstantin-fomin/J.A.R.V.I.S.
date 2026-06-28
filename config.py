@@ -61,6 +61,11 @@ ACTION_LOG_DB_PATH = Path(os.getenv("ACTION_LOG_DB_PATH") or (BASE_DIR / "action
 # Инбокс (быстрый захват). SQLite, отдельно от остальных.
 INBOX_DB_PATH = Path(os.getenv("INBOX_DB_PATH") or (BASE_DIR / "inbox.db"))
 
+# Контакты (лёгкий CRM, §14). SQLite, отдельно от остальных.
+CONTACTS_DB_PATH = Path(os.getenv("CONTACTS_DB_PATH") or (BASE_DIR / "contacts.db"))
+# За сколько дней до дня рождения присылать ежедневное напоминание.
+BIRTHDAY_REMINDER_LEAD_DAYS = int(os.getenv("BIRTHDAY_REMINDER_LEAD_DAYS") or 3)
+
 # Проактивные подсказки из заметок (§13). SQLite-лог показанных подсказок —
 # отдельно от остальных. Параметры кластеризации совпадают с дефолтами
 # ProactiveSuggester (окно 14 дней, минимум 3 записи, не повторять тему чаще
