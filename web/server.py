@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import config
 from bills import BillStore, current_month
+from contacts import days_until_birthday
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -88,6 +89,10 @@ class BillInstanceUpdate(BaseModel):
     status: Optional[str] = None       # pending / paid
 
 
+class InboxCreate(BaseModel):
+    text: str
+
+
 def create_app(
     memory: MemoryManager,
     llm: LLMClient,
@@ -95,6 +100,9 @@ def create_app(
     tasks: TaskStore,
     bills: BillStore,
     calendar=None,
+    inbox=None,
+    contacts=None,
+    reads=None,
 ) -> FastAPI:
     app = FastAPI(title="J.A.R.V.I.S.", docs_url=None, redoc_url=None)
     history: list[dict] = []
@@ -238,6 +246,41 @@ def create_app(
         except Exception:
             logger.exception("Не удалось получить события календаря")
             return []
+
+    @app.get("/api/reads")
+    def list_reads(status: Optional[str] = None) -> dict:
+        # ?status=unread|read; без параметра — все. Для дашборда «почитать».
+        if reads is None:
+            return {"reads": []}
+        return {"reads": reads.list(status=status)}
+
+    @app.get("/api/inbox")
+    def list_inbox(status: Optional[str] = "pending") -> dict:
+        # По умолчанию — pending (то, что на разбор). ?status=processed — разобранное.
+        if inbox is None:
+            return {"items": []}
+        return {"items": inbox.list(status=status)}
+
+    @app.post("/api/inbox")
+    def create_inbox(req: InboxCreate) -> dict:
+        if inbox is None:
+            raise HTTPException(status_code=503, detail="Инбокс не настроен")
+        text = req.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Пустой text")
+        return {"item": inbox.create(text, source="dashboard")}
+
+    @app.get("/api/contacts/birthdays")
+    def upcoming_birthdays(days: int = 7) -> dict:
+        # Ближайшие ДР в окне [сегодня, сегодня+days], + сколько дней до праздника.
+        if contacts is None:
+            return {"birthdays": []}
+        today = date.today()
+        out = [
+            {**c, "in_days": days_until_birthday(date.fromisoformat(c["birthday"]), today)}
+            for c in contacts.upcoming_birthdays(within_days=days, today=today)
+        ]
+        return {"birthdays": out}
 
     # Статический дашборд: /dashboard/ → dashboard/index.html (html=True). Монтируем
     # последним, чтобы не перехватывать /api/* и прочие маршруты выше. Реальный

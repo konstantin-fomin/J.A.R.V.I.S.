@@ -100,7 +100,8 @@ def main() -> None:
         "Веб-интерфейс: http://%s:%d", config.WEB_HOST, config.WEB_PORT
     )
     uvicorn.run(
-        create_app(memory, llm, facts, tasks_store, bills_store, calendar),
+        create_app(memory, llm, facts, tasks_store, bills_store, calendar,
+                   inbox_store, contacts_store, reads_store),
         host=config.WEB_HOST,
         port=config.WEB_PORT,
         log_level="warning",
