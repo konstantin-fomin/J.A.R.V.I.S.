@@ -88,26 +88,78 @@ def _snippet(text: str) -> str:
     return flat[: PREMEETING_SNIPPET_MAX - 1].rstrip() + "…"
 
 
-def build_reminder_text(event: dict, minutes: int, memory=None,
-                        notes_count: int = 3, max_distance: float = 0.32) -> str:
-    """Текст напоминания о встрече + (опционально) секция «Из твоих заметок».
+def contacts_stale_for(contacts, days: int, today=None) -> list:
+    """§20: контакты, с которыми не общались days+ дней. Без last_contact_date — игнор."""
+    today = today or date.today()
+    result = []
+    for c in contacts.list():
+        lcd = c.get("last_contact_date")
+        if not lcd:
+            continue
+        try:
+            delta = (today - date.fromisoformat(lcd)).days
+        except ValueError:
+            continue
+        if delta >= days:
+            result.append(c)
+    return result
 
-    Семантический поиск идёт по тому же MemoryManager, что и обычный chat, по
-    названию встречи и описанию (если есть). Релевантные совпадения (top-N в
-    пределах порога) добавляются секцией. Нет релевантных — секции нет,
-    пустой блок не показываем и нерелевантное не натягиваем."""
+
+def filter_stale_for_send(stale: list, log, block_days: int, today=None) -> list:
+    """§20: из stale убираем тех, кому уже слали reminder в последние block_days."""
+    from suggestions import theme_hash
+    today = today or date.today()
+    out = []
+    for c in stale:
+        h = theme_hash(f"stale:{c['id']}")
+        last = log.last_suggested(h)
+        if last is None or (today - last).days >= block_days:
+            out.append(c)
+    return out
+
+
+def build_reminder_text(event: dict, minutes: int, memory=None,
+                        notes_count: int = 3, max_distance: float = 0.32,
+                        contacts=None, obligations=None) -> str:
+    """Текст напоминания о встрече + (опц.) секции «Из твоих заметок» и контакта.
+
+    §20: если у встречи есть attendees и contacts настроены — матчим email на
+    contacts.email и добавляем структурную секцию (last_contact_date + open
+    obligations) ДОПОЛНИТЕЛЬНО к семантическому поиску по заметкам."""
     base = (f"🔔 Через {minutes} мин встреча: «{event['title']}» "
             f"в {event['start'].strftime('%H:%M')}")
-    if memory is None:
+    lines = [base]
+
+    # Семантические заметки из памяти (существующая логика)
+    if memory is not None:
+        query = event["title"]
+        if event.get("description"):
+            query += " " + event["description"]
+        notes = memory.relevant_notes(query, notes_count, max_distance)
+        if notes:
+            lines += ["", "📝 Из твоих заметок:"]
+            lines += [f"• {_snippet(text)}" for text, _file in notes]
+
+    # §20: структурная секция по контакту — если есть contacts и attendees
+    if contacts is not None:
+        for email in event.get("attendees", []):
+            contact = contacts.find_by_email(email)
+            if contact is None:
+                continue
+            lines.append("")
+            lines.append(f"👤 Контакт: {contact['name']}")
+            if contact.get("last_contact_date"):
+                lines.append(f"  Последний контакт: {contact['last_contact_date']}")
+            if obligations is not None:
+                # первое слово имени как подстрока для поиска обязательств
+                person_hint = contact["name"].split()[0]
+                open_obs = obligations.list(person=person_hint, status="open")
+                for o in open_obs:
+                    arrow = "← жду" if o["direction"] == "waiting_on" else "→ должен"
+                    lines.append(f"  {arrow}: {o['title']}")
+
+    if len(lines) == 1:
         return base
-    query = event["title"]
-    if event.get("description"):
-        query += " " + event["description"]
-    notes = memory.relevant_notes(query, notes_count, max_distance)
-    if not notes:
-        return base
-    lines = [base, "", "📝 Из твоих заметок:"]
-    lines += [f"• {_snippet(text)}" for text, _file in notes]
     return "\n".join(lines)
 
 
@@ -323,6 +375,39 @@ async def cleanup_recurring_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("Повторяющиеся задачи: вычищено старых выполненных инстансов — %d", removed)
 
 
+# Время ежедневной проверки «давно не виделись» (§20). Чуть позже obligation-followup.
+STALE_CONTACT_REMINDER_TIME = time(hour=10, minute=15)
+# Не контактировали больше STALE_CONTACT_DAYS дней — попадают в reminder.
+STALE_CONTACT_DAYS = 14
+# Блок повторного показа: не чаще раза в STALE_CONTACT_BLOCK_DAYS.
+STALE_CONTACT_BLOCK_DAYS = 7
+
+
+async def stale_contact_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """§20: ежедневно напоминает о контактах, с которыми давно не общались (14+ дней).
+    Дедуп через SuggestionLog — не повторяем тот же контакт раньше чем через 7 дней."""
+    if quiet_defer(context, stale_contact_reminder):
+        return
+    data = context.job.data
+    contacts: ContactStore = data["contacts"]
+    log: SuggestionLog = data["log"]
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        return
+    today = date.today()
+    stale = await asyncio.to_thread(contacts_stale_for, contacts, STALE_CONTACT_DAYS, today)
+    to_send = filter_stale_for_send(stale, log, STALE_CONTACT_BLOCK_DAYS, today)
+    if not to_send:
+        return
+    from suggestions import theme_hash
+    lines = ["👥 Давно не общался:"]
+    for c in to_send:
+        lcd = c.get("last_contact_date") or "неизвестно"
+        lines.append(f"• {c['name']} — последний контакт: {lcd}")
+        log.mark_suggested(theme_hash(f"stale:{c['id']}"), c["name"], when=today)
+    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+
+
 def build_application(
     token: str,
     memory: MemoryManager,
@@ -384,6 +469,12 @@ def build_application(
             app.job_queue.run_daily(
                 birthday_reminder, time=BIRTHDAY_REMINDER_TIME, data=contacts,
                 name="birthday_reminder",
+            )
+            # §20: ежедневно — кого давно не видел
+            app.job_queue.run_daily(
+                stale_contact_reminder, time=STALE_CONTACT_REMINDER_TIME,
+                data={"contacts": contacts, "log": suggest_log},
+                name="stale_contact_reminder",
             )
         # Ежедневный follow-up по обязательствам — если стор настроен (§19.1)
         if obligations is not None:

@@ -56,6 +56,7 @@ INTENTS = {
     "snooze",
     "undo_last",
     "edit_last",
+    "query_by_contact",
     "none",
 }
 
@@ -97,6 +98,7 @@ RISK_LEVELS = {
     "query_recurring_tasks": "safe",
     "delete_recurring_template": "dangerous",
     "snooze": "medium",
+    "query_by_contact": "safe",
 }
 
 # edit_last (§17): какие поля какой сущности можно править у последнего действия и
@@ -221,6 +223,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - inbox_reclassify — переразобрать ПОСЛЕДНЮЮ запись инбокса: это не задача, а мысль на потом («это не задача, отложи подумать», «убери из задач, пусть полежит», «это на когда-нибудь»). Поле: status — куда отложить: "someday" (когда-нибудь), "needs_decision" (нужно решить), "maybe_later" (может быть потом).
 - log_decision — записать ПРИНЯТОЕ решение в журнал решений («запиши решение: …», «зафиксируй: решили …», «для протокола: выбрали …»). Поле: text — исходная формулировка решения (с причиной/альтернативами, если есть).
 - query_decisions — найти прошлое решение и его обоснование («почему мы отказались от X», «какие решения по Y», «что мы решили насчёт …»). Поле: text — суть вопроса.
+- query_by_contact — сводная карточка человека: данные контакта, связанные задачи, обязательства, предстоящие встречи («что у меня с Аней», «всё по Петру», «покажи карточку Васи»). Поле: name_hint (имя, подстрока).
 - save_link — сохранить ссылку «на потом» / «почитать позже» / «в закладки». Срабатывает ТОЛЬКО если в сообщении есть URL И явный контекст отложенного чтения («почитаю потом», «на потом», «сохрани ссылку», «в закладки»). Просто URL без такого контекста — НЕ save_link (это обычное сообщение none). Поле: url (сам адрес).
 - query_reads — показать список «почитать» («что у меня в почитать», «непрочитанные ссылки»). Полей нет.
 - mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
@@ -520,6 +523,7 @@ class IntentRouter:
             for key in ("due_date", "due_time", "project"):
                 if data.get(key):
                     params[key] = data[key]
+            # (§20) contact linking перенесена в _apply (чтобы работала при прямом execute)
             return self._gate(
                 intent, {"type": "create_task", "params": params}, f"создать задачу «{title}»?", low
             )
@@ -580,6 +584,19 @@ class IntentRouter:
             if not project:
                 return Resolution("chat")  # без темы — обычный разговор
             return self._gate(intent, {"type": "query_by_project", "project": project}, "", low)
+
+        if intent == "query_by_contact":
+            hint = str(data.get("name_hint") or "").strip()
+            if not hint:
+                return Resolution("chat")
+            if self.contacts is None:
+                return Resolution("message", text="Контакты не настроены.")
+            matches = self.contacts.find(hint)
+            if not matches:
+                return Resolution("message", text=f"Контакт «{hint}» не найден.")
+            contact = matches[0]
+            return self._gate(intent, {"type": "query_by_contact",
+                                       "contact_id": contact["id"]}, "", low)
 
         if intent == "capture":
             note = str(data.get("note") or "").strip()
@@ -709,6 +726,68 @@ class IntentRouter:
             names = ", ".join(f"«{c['name']}»" for c in matches[:5])
             return Resolution("message", text=f"Нашёл несколько контактов: {names}. Уточни, кого именно.")
         return matches[0]
+
+    def _execute_query_by_contact(self, action: dict) -> str:
+        """§20: сводная карточка контакта — данные, задачи, обязательства, встречи."""
+        assert self.contacts is not None
+        cid = action["contact_id"]
+        contact = self.contacts.get(cid)
+        if contact is None:
+            return "Контакт не найден."
+
+        lines: list[str] = [f"👤 {contact['name']}"]
+        if contact.get("email"):
+            lines.append(f"  📧 {contact['email']}")
+        if contact.get("last_contact_date"):
+            lines.append(f"  📅 Последний контакт: {contact['last_contact_date']}")
+        if contact.get("birthday"):
+            lines.append(f"  🎂 ДР: {contact['birthday']}")
+        if contact.get("notes"):
+            lines.append(f"  📝 {contact['notes']}")
+
+        # Задачи, привязанные к контакту
+        tasks = self.tasks.list_by_contact(cid, status="todo")
+        if tasks:
+            lines.append("\n📋 Открытые задачи:")
+            for t in tasks:
+                due = f" (до {t['due_date']})" if t.get("due_date") else ""
+                lines.append(f"  • {t['title']}{due}")
+
+        # Обязательства с этим человеком
+        if self.obligations is not None:
+            obs = self.obligations.list(person=contact["name"].split()[0], status="open")
+            if obs:
+                lines.append("\n🔗 Открытые обязательства:")
+                for o in obs:
+                    arrow = "← жду от них" if o["direction"] == "waiting_on" else "→ я должен"
+                    lines.append(f"  • {o['title']} ({arrow})")
+
+        # Встречи ±14 дней, если у контакта есть email и есть calendar
+        if self.calendar is not None and contact.get("email"):
+            now = date.today()
+            start = datetime.combine(now - timedelta(days=14), datetime.min.time())
+            end = datetime.combine(now + timedelta(days=14), datetime.max.time())
+            # Добавляем timezone — calendar возвращает aware datetimes
+            from zoneinfo import ZoneInfo
+            import config as _cfg
+            tz = ZoneInfo(_cfg.CALENDAR_TIMEZONE)
+            try:
+                events = self.calendar.list_events(
+                    start.replace(tzinfo=tz), end.replace(tzinfo=tz)
+                )
+                email_lower = contact["email"].lower()
+                matching = [
+                    e for e in events
+                    if email_lower in [a.lower() for a in e.get("attendees", [])]
+                ]
+                if matching:
+                    lines.append("\n📅 Встречи:")
+                    for e in matching:
+                        lines.append(f"  • {e['start'].strftime('%d.%m %H:%M')} {e['title']}")
+            except Exception:
+                pass  # calendar недоступен — не ломаем ответ
+
+        return "\n".join(lines)
 
     def _apply_contact(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
         """Выполняет действие над контактом. Сюда не попадаем без настроенных
@@ -1306,7 +1385,26 @@ class IntentRouter:
         ok=False для read-only (query_*) и неуспешных действий — их не журналируем."""
         kind = action["type"]
         if kind == "create_task":
-            task = self.tasks.create(**action["params"])
+            params = dict(action["params"])
+            # (§20) best-effort contact linking — здесь, а не в resolve, чтобы работало и при
+            # прямом вызове execute (дашборд, веб-API и пр.)
+            if self.contacts is not None and not params.get("contact_id"):
+                def _norm(s: str) -> str:
+                    return s.lower().replace("ё", "е")
+                title_norm = _norm(params.get("title", ""))
+                title_words = title_norm.split()
+                for c in self.contacts.list():
+                    tokens = _norm(c["name"]).split()
+                    first_token = tokens[0] if tokens else ""
+                    if not first_token or len(first_token) < 2:
+                        continue
+                    if _norm(c["name"]) in title_norm or any(
+                        w.startswith(first_token) or first_token.startswith(w)
+                        for w in title_words if len(w) >= 3
+                    ):
+                        params["contact_id"] = c["id"]
+                        break
+            task = self.tasks.create(**params)
             due = ""
             if task["due_date"]:
                 due = f" на {task['due_date']}" + (f" {task['due_time']}" if task["due_time"] else "")
@@ -1339,6 +1437,8 @@ class IntentRouter:
             if not items:
                 return f"По теме «{proj}» задач нет.", None, None, False
             return format_tasks(items), None, None, False
+        if kind == "query_by_contact":
+            return self._execute_query_by_contact(action), None, None, False
         if kind == "capture":
             if self.inbox is None:
                 return "Инбокс не настроен 🤔", None, None, False

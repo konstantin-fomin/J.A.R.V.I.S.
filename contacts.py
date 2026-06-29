@@ -50,11 +50,16 @@ class ContactStore:
                     last_contact_date TEXT,
                     birthday TEXT,
                     notes TEXT,
+                    email TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            # Миграция старых баз: добавляем email, если колонки ещё нет (§20).
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(contacts)")}
+            if "email" not in cols:
+                conn.execute("ALTER TABLE contacts ADD COLUMN email TEXT")
 
     def create(
         self,
@@ -62,14 +67,15 @@ class ContactStore:
         last_contact_date: Optional[str] = None,
         birthday: Optional[str] = None,
         notes: Optional[str] = None,
+        email: Optional[str] = None,
     ) -> dict:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO contacts "
-                "(name, last_contact_date, birthday, notes, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, last_contact_date, birthday, notes, now, now),
+                "(name, last_contact_date, birthday, notes, email, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, last_contact_date, birthday, notes, email, now, now),
             )
             contact_id = cur.lastrowid
         assert contact_id is not None  # свежий INSERT всегда даёт rowid
@@ -110,6 +116,16 @@ class ContactStore:
             return []
         # Python .lower() корректен и для кириллицы, в отличие от SQL LIKE.
         return [c for c in self.list() if hint in c["name"].lower()]
+
+    def find_by_email(self, email: str) -> Optional[dict]:
+        """Точный регистронезависимый матч по email. Возвращает первого совпавшего или None."""
+        needle = email.strip().lower()
+        if not needle:
+            return None
+        for c in self.list():
+            if c.get("email") and c["email"].strip().lower() == needle:
+                return c
+        return None
 
     def upcoming_birthdays(self, within_days: int, today: Optional[date] = None) -> list[dict]:
         """Контакты с ДР в окне [сегодня, сегодня+within_days], по возрастанию

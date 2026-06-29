@@ -52,6 +52,23 @@ def _parse_google_dt(value: dict, tz) -> dt.datetime:
     return dt.datetime.combine(day, dt.time.min, tzinfo=tz)
 
 
+def _parse_google_item(item: dict, tz) -> dict:
+    """Один Google Calendar event item → внутренний dict. §20: добавляем attendees."""
+    attendees = [
+        a["email"] for a in item.get("attendees", [])
+        if a.get("email")
+    ]
+    return {
+        "id": item["id"],
+        "title": item.get("summary", "(без названия)"),
+        "description": item.get("description", ""),
+        "start": _parse_google_dt(item["start"], tz),
+        "end": _parse_google_dt(item["end"], tz),
+        "html_link": item.get("htmlLink", ""),
+        "attendees": attendees,
+    }
+
+
 class CalendarClient:
     """Тонкая обёртка над Google Calendar v3 (календарь 'primary')."""
 
@@ -96,19 +113,7 @@ class CalendarClient:
             )
             .execute()
         )
-        events = []
-        for item in resp.get("items", []):
-            events.append(
-                {
-                    "id": item["id"],
-                    "title": item.get("summary", "(без названия)"),
-                    "description": item.get("description", ""),
-                    "start": _parse_google_dt(item["start"], self._tz),
-                    "end": _parse_google_dt(item["end"], self._tz),
-                    "html_link": item.get("htmlLink", ""),
-                }
-            )
-        return events
+        return [_parse_google_item(item, self._tz) for item in resp.get("items", [])]
 
     def get_event(self, event_id) -> dict | None:
         """Одна встреча по id (или None, если не найдена/удалена). Нужно для

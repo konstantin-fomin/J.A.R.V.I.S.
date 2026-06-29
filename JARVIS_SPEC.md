@@ -1297,3 +1297,49 @@ TEXT), меняется набор допустимых значений и от
 возвращает `execute`-действие с исходным текстом; саму работу (extract+write для
 `log_decision`, поиск для `query_decisions`) выполняет `Handlers`, перехватывая
 тип действия — тем же приёмом, что `save_link` и `query_weekly_review`.
+
+---
+
+## §20 Entity linking & Contact-aware reminders
+
+### Цель
+
+Связать задачи с контактами и добавить персональный контекст в pre-meeting bundle +
+ежедневное напоминание «давно не общался».
+
+### Миграции
+
+- `contacts.email TEXT` (nullable) — ALTER TABLE с защитой существующих данных.
+- `tasks.contact_id INTEGER` (nullable FK → contacts.id) — аналогично.
+
+### create_task: автолинковка
+
+При создании задачи (`_apply`, а не `resolve`) — если contacts настроены и
+`contact_id` не задан явно — ищем контакт по первому токену имени в title (с
+нормализацией `ё`→`е`, ловит падежи: «Петру»→«Пётр»). Best-effort: не блокируем
+создание при отсутствии совпадений.
+
+### query_by_contact (safe)
+
+Карточка контакта: имя, email, last_contact_date, birthday, notes + открытые задачи
+(`list_by_contact`) + открытые обязательства (fuzzy match по первому слову имени) +
+встречи ±14 дней (email-матч с `attendees`). Возвращает `message` при ненайденном
+контакте, `chat` при пустом `name_hint`.
+
+### Pre-meeting context (§12 расширение)
+
+`build_reminder_text` принял `contacts=` и `obligations=`. Если у события есть
+`attendees: list[str]` (email-адреса) и contacts настроены — матчим каждый email с
+`contacts.find_by_email()`. При совпадении добавляем структурную секцию (имя,
+`last_contact_date`, открытые обязательства) ДОПОЛНИТЕЛЬНО к семантическим заметкам.
+
+Поле `attendees` появилось в `calendar_client._parse_google_item` — выделена из
+inline-цикла `list_events` как публичная (с одним `_`) функция модуля.
+
+### stale_contact_reminder (daily job)
+
+Контакты с `last_contact_date > 14 дней` → напоминание. Дедуп через `SuggestionLog`
+с `theme_hash(f"stale:{c['id']}")`, block_days=7. Чистые вспомогательные функции
+`contacts_stale_for(contacts, days, today)` и `filter_stale_for_send(stale, log,
+block_days, today)` живут в `telegram_bot.py` для тестируемости. Job шлётся в
+10:15 и оборачивается `quiet_defer`.

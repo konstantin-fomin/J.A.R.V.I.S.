@@ -33,17 +33,20 @@ class TaskStore:
                     source TEXT NOT NULL DEFAULT 'telegram',
                     project TEXT,
                     recurring_template_id INTEGER,
+                    contact_id INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
-            # Миграция старых баз: добавляем project / recurring_template_id, если колонок ещё нет.
+            # Миграция старых баз: добавляем колонки, если их ещё нет.
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "project" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN project TEXT")
             if "recurring_template_id" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN recurring_template_id INTEGER")
+            if "contact_id" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN contact_id INTEGER")
 
     def create(
         self,
@@ -55,16 +58,17 @@ class TaskStore:
         source: str = "telegram",
         project: Optional[str] = None,
         recurring_template_id: Optional[int] = None,
+        contact_id: Optional[int] = None,
     ) -> dict:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO tasks "
                 "(title, description, status, priority, due_date, due_time, source, project, "
-                "recurring_template_id, created_at, updated_at) "
-                "VALUES (?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?)",
+                "recurring_template_id, contact_id, created_at, updated_at) "
+                "VALUES (?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (title, description, priority, due_date, due_time, source, project,
-                 recurring_template_id, now, now),
+                 recurring_template_id, contact_id, now, now),
             )
             task_id = cur.lastrowid
         return self.get(task_id)
@@ -112,6 +116,19 @@ class TaskStore:
                 (template_id, due_date),
             ).fetchone()
         return row is not None
+
+    def list_by_contact(self, contact_id: int,
+                        status: Optional[str] = None) -> "list[dict]":
+        """Задачи, привязанные к контакту (§20). status=None — все статусы."""
+        query = "SELECT * FROM tasks WHERE contact_id = ?"
+        params: list = [contact_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY COALESCE(due_time, '23:59'), id"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
 
     def purge_recurring_done(self, before_date: str) -> int:
         """Удаляет ВЫПОЛНЕННЫЕ инстансы recurring-шаблонов с due_date раньше
