@@ -7,6 +7,7 @@ MemoryManager.relevant_notes тестируется с подменённым и
 import datetime
 from zoneinfo import ZoneInfo
 
+import config
 from bot.telegram_bot import build_reminder_text
 from memory.manager import MemoryManager
 
@@ -52,6 +53,27 @@ def test_relevant_notes_empty_when_all_too_far():
 def test_relevant_notes_caps_at_k():
     scored = [("a", "f.md", 0.1), ("b", "f.md", 0.1), ("c", "f.md", 0.1), ("d", "f.md", 0.1)]
     assert len(mm(scored).relevant_notes("q", k=3, max_distance=0.6)) == 3
+
+
+# --- дефолтный порог pre-meeting строже общего chat-поиска ---------------------
+
+def test_default_premeeting_threshold_cuts_smalltalk_keeps_contact():
+    """Дефолтный порог pre-meeting отсекает small-talk-шум, но держит тематическую
+    заметку-контакт. Дистанции — реально замеренные на Gemini-эмбеддингах:
+    заметка про Петра против «Встреча с Петром» — 0.28, а болтовня «как дела» и
+    факты дом/машина против любого запроса оседают на шумовом полу ~0.39–0.40.
+    При прежних 0.6 шум проходил; строгий порог (0.32) его режет."""
+    scored = [
+        ("## Факты\n- Пётр — коллега по работе, ведёт проект миграции",
+         "topics/petr.md", 0.2823),
+        ("## Факты\n- Пользователь имеет дом.\n- Пользователь имеет машину.",
+         "topics/property.md", 0.3892),
+        ("- [я] Привет. Как твои дела\n- [бот] Привет! Мои дела отлично",
+         "journal/2026-06-13.md", 0.4009),
+    ]
+    notes = mm(scored).relevant_notes(
+        "Встреча с Петром", k=3, max_distance=config.MEMORY_RELEVANCE_MAX_DISTANCE)
+    assert [file for _text, file in notes] == ["topics/petr.md"]
 
 
 # --- build_reminder_text: есть релевантная заметка ----------------------------

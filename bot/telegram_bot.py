@@ -89,7 +89,7 @@ def _snippet(text: str) -> str:
 
 
 def build_reminder_text(event: dict, minutes: int, memory=None,
-                        notes_count: int = 3, max_distance: float = 0.6) -> str:
+                        notes_count: int = 3, max_distance: float = 0.32) -> str:
     """Текст напоминания о встрече + (опционально) секция «Из твоих заметок».
 
     Семантический поиск идёт по тому же MemoryManager, что и обычный chat, по
