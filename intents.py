@@ -168,6 +168,18 @@ _SNOOZE_NAMED = {
 }
 _SNOOZE_DURATION = re.compile(r"^\+?(\d+)\s*([mhd])$")
 
+# §20: базовая валидация email (single-user, не строгий RFC — отсекаем мусор,
+# чтобы в contacts.email не попадало то, что не сматчится с attendees встречи).
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Поиск email внутри свободного текста (строже валидатора: ASCII + буквенный TLD,
+# чтобы не цеплять хвостовую пунктуацию вроде «work.io,»). Нужен для фолбэка ниже.
+_EMAIL_FIND = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _valid_email(value: str | None) -> bool:
+    """True, если строка похожа на email (есть локальная часть, @, домен с точкой)."""
+    return bool(value and _EMAIL_RE.match(value.strip()))
+
 
 def normalize_snooze_offset(offset: str, now: datetime) -> dict | None:
     """Относительный offset от Gemini → конкретные {due_date[, due_time]} от now.
@@ -212,8 +224,8 @@ PROMPT = """Ты — парсер намерений личного ассист
 - query_events — показать встречи. Поле: filter ("today"|"week"|null).
 - query_by_project — показать задачи по теме/проекту («что у меня по X», «покажи задачи по проекту X»). Поле: project (название темы).
 - capture — записать мысль в инбокс (быстрый захват без разбора). Поле: note (что записать).
-- create_contact — добавить человека в контакты («добавь контакт …», «запомни …»). Поля: name (имя), birthday ("ГГГГ-ММ-ДД" или null), note (заметка про человека или null).
-- update_contact — отметить, что пообщался с человеком, и/или дописать заметку («созвонился с …», «виделся с …», «заметка про …»). Поля: name_hint (кто), note (что дописать или null). last_contact_date выставится на сегодня автоматически.
+- create_contact — добавить человека в контакты («добавь контакт …», «запомни …»). Поля: name (имя), email (адрес почты вида user@host или null), birthday ("ГГГГ-ММ-ДД" или null), note (заметка про человека или null).
+- update_contact — отметить, что пообщался с человеком, дописать заметку и/или задать почту («созвонился с …», «виделся с …», «заметка про …», «у Ани почта …»). Поля: name_hint (кто), email (новый адрес почты или null), note (что дописать или null). last_contact_date выставится на сегодня автоматически.
 - query_contacts — показать контакты. Поле: filter ("upcoming_birthdays" — у кого скоро день рождения | "by_name" — поиск по имени | null — все). Для by_name заполни name.
 - delete_contact — удалить контакт. Поле: name_hint.
 - create_obligation — записать обязательство: чего ты ЖДЁШЬ от человека или что ТЫ кому-то должен («жду от Пети отчёт», «Маша должна мне денег» → waiting_on; «я должен Васе книгу», «надо вернуть долг Маше» → i_owe). Это про отношения с человеком, а не дело со сроком (то — create_task). Поля: title (что именно), person (кто), direction ("waiting_on" — жду от кого-то | "i_owe" — я должен), follow_up_date ("ГГГГ-ММ-ДД" — когда напомнить, или null), related_project (тема или null).
@@ -292,6 +304,14 @@ def parse_intent(llm, text: str, today: str | None = None) -> dict:
     # к bool (модель могла прислать строку "true"/"false"). Реальный Gemini для таких
     # сообщений отдаёт чистый none, поэтому unrecognized не срабатывает — нужен явный флаг.
     data["is_action_request"] = str(data.get("is_action_request")).strip().lower() == "true"
+    # §20: детерминированный фолбэк извлечения email. Живая проверка показала, что
+    # Gemini Flash нестабильно отдаёт поле email (часть формулировок — пропуск 1/3..3/3),
+    # а это весь смысл contact-aware reminders. Если intent про контакт и валидной
+    # почты модель не дала — берём первый email-токен из исходного текста сами.
+    if data["intent"] in ("create_contact", "update_contact") and not _valid_email(data.get("email")):
+        found = _EMAIL_FIND.search(text)
+        if found:
+            data["email"] = found.group(0)
     return data
 
 
@@ -666,6 +686,25 @@ class IntentRouter:
     # query_contacts — read-only, выполняется сразу. Все мутации логируются
     # (entity_type=contact) и отменяемы через undo_last.
 
+    @staticmethod
+    def _attach_email(data: dict, target: dict, action: dict) -> None:
+        """§20: кладёт email в target (params/fields), если он валиден. Невалидный
+        не сохраняем (чтобы не ломать матч по attendees), но помечаем action —
+        _apply_contact честно сообщит, что почту не распознал."""
+        raw = str(data.get("email") or "").strip()
+        if not raw:
+            return
+        if _valid_email(raw):
+            target["email"] = raw
+        else:
+            action["email_rejected"] = raw
+
+    @staticmethod
+    def _email_warn(action: dict) -> str:
+        """Приписка к ответу, если переданный email не прошёл валидацию."""
+        bad = action.get("email_rejected")
+        return f"\n⚠️ Почту «{bad}» не распознал — не сохранил." if bad else ""
+
     def _resolve_contact(self, intent: str, data: dict, low: bool) -> Resolution:
         assert self.contacts is not None  # resolve() гарантирует контакты до вызова
 
@@ -678,9 +717,9 @@ class IntentRouter:
                 params["birthday"] = data["birthday"]
             if data.get("note"):
                 params["notes"] = data["note"]
-            return self._gate(
-                intent, {"type": "create_contact", "params": params}, f"добавить контакт «{name}»?", low
-            )
+            action = {"type": "create_contact", "params": params}
+            self._attach_email(data, params, action)
+            return self._gate(intent, action, f"добавить контакт «{name}»?", low)
 
         if intent == "update_contact":
             hint = data.get("name_hint") or data.get("name")
@@ -693,11 +732,11 @@ class IntentRouter:
             if note:  # заметку дописываем к существующей, а не затираем
                 existing = (single.get("notes") or "").strip()
                 fields["notes"] = f"{existing}\n{note}" if existing else note
+            action = {"type": "update_contact", "contact_id": single["id"],
+                      "name": single["name"], "fields": fields}
+            self._attach_email(data, fields, action)
             return self._gate(
-                intent,
-                {"type": "update_contact", "contact_id": single["id"],
-                 "name": single["name"], "fields": fields},
-                f"обновить контакт «{single['name']}»?", low,
+                intent, action, f"обновить контакт «{single['name']}»?", low,
             )
 
         if intent == "delete_contact":
@@ -797,10 +836,14 @@ class IntentRouter:
         if kind == "create_contact":
             c = self.contacts.create(**action["params"])
             bday = f" (др {c['birthday']})" if c["birthday"] else ""
-            return f"✅ Добавил контакт: «{c['name']}»{bday}", str(c["id"]), c, True
+            mail = f" 📧 {c['email']}" if c.get("email") else ""
+            msg = f"✅ Добавил контакт: «{c['name']}»{bday}{mail}{self._email_warn(action)}"
+            return msg, str(c["id"]), c, True
         if kind == "update_contact":
             after = self.contacts.update(action["contact_id"], **action["fields"])
-            return f"✅ Обновил контакт «{action['name']}»", str(action["contact_id"]), after, True
+            mail = f" 📧 {after['email']}" if after and after.get("email") else ""
+            msg = f"✅ Обновил контакт «{action['name']}»{mail}{self._email_warn(action)}"
+            return msg, str(action["contact_id"]), after, True
         if kind == "edit_contact":  # edit_last: правка поля последнего контакта (логируется как update)
             after = self.contacts.update(action["contact_id"], **action["fields"])
             return f"✏️ Изменил контакт «{(after or {}).get('name', action['name'])}»", \
