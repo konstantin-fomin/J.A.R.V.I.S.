@@ -273,10 +273,35 @@ def parse_intent(llm, text: str, today: str | None = None) -> dict:
         logger.exception("intent: запрос к LLM не удался")
         return {"intent": "none", "confidence": "high"}
     data = _parse_json_object(raw)
-    if data.get("intent") not in INTENTS:
-        return {"intent": "none", "confidence": "high"}
+    raw_intent = data.get("intent")
+    if raw_intent not in INTENTS:
+        # Имя intent не из набора. Если это непустая строка (не "none") — модель
+        # пыталась выдать команду, которой мы не поддерживаем (как create_bill для
+        # массового создания платежей, §3): помечаем unrecognized, чтобы хендлер
+        # честно отказал, а не уходил в chat (иначе chat сконфабулирует «сделал»).
+        # Пустой intent / сбой парсинга JSON — это просто болтовня (unrecognized=False).
+        unrecognized = isinstance(raw_intent, str) and raw_intent.strip() not in ("", "none")
+        return {"intent": "none", "confidence": "high", "unrecognized": unrecognized}
     data["confidence"] = "low" if str(data.get("confidence", "")).strip().lower() == "low" else "high"
     return data
+
+
+def route_after_resolve(intent_data: dict, resolution_kind: str) -> str:
+    """Решает, как обработать сообщение после Router.resolve. §(б).
+
+    Возвращает:
+      "handle" — резолв дал действие/ответ (execute/confirm/message): обрабатываем штатно;
+      "refuse" — это была команда, которой нет (unrecognized): честный отказ, НЕ chat;
+      "chat"   — обычная болтовня (genuine none): идём в chat/memory-пайплайн.
+
+    Различие refuse/chat и есть лечение конфабуляции: chat-пайплайн без доступа к
+    сторам не должен «подтверждать» действие, которое мы вообще не умеем выполнять.
+    """
+    if resolution_kind != "chat":
+        return "handle"
+    if intent_data.get("unrecognized"):
+        return "refuse"
+    return "chat"
 
 
 def format_tasks(items: list[dict]) -> str:

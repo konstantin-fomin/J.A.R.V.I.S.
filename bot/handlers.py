@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 import config
 from bills import BillStore, current_month
 from decisions import DecisionLogger
-from intents import IntentRouter, parse_intent
+from intents import IntentRouter, parse_intent, route_after_resolve
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -454,11 +454,20 @@ class Handlers:
         # action один и тот же объект, в т.ч. когда он осядет в pending_action).
         if resolution.action is not None:
             resolution.action["raw_message"] = text
-        if resolution.kind != "chat":
+        route = route_after_resolve(intent_data, resolution.kind)
+        if route == "handle":
             await self._handle_resolution(update, context, resolution)
             return
+        if route == "refuse":
+            # Модель пыталась выдать команду, которой нет (§3/§(б)). Честный отказ
+            # вместо chat-пайплайна — иначе он сконфабулирует «сделал».
+            await update.message.reply_text(
+                "Не понял, что нужно сделать — такой команды я пока не умею. "
+                "Можешь переформулировать или сделать это вручную/одной поддерживаемой командой."
+            )
+            return
 
-        # intent none → обычный chat/memory pipeline
+        # genuine none → обычный chat/memory pipeline
         await self._chat(update, context, text)
 
     async def _handle_resolution(self, update, context, resolution) -> None:
