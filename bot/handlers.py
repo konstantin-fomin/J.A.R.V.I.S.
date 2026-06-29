@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 import config
 from bills import BillStore, current_month
 from decisions import DecisionLogger
-from intents import IntentRouter, parse_intent, route_after_resolve
+from intents import IntentRouter, guard_chat_answer, parse_intent, route_after_resolve
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -612,6 +612,9 @@ class Handlers:
                 {"role": "user", "content": text},
             ]
             answer = await asyncio.to_thread(self.llm.chat, messages)
+            # (1) Последняя линия защиты §(б): если модель всё же сымитировала
+            # выполнение действия — заменяем честным отказом, не отправляем как есть.
+            answer = guard_chat_answer(answer)
         except Exception:
             logger.exception("Ошибка при обработке сообщения")
             await update.message.reply_text(

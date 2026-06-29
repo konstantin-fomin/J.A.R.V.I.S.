@@ -243,9 +243,10 @@ PROMPT = """Ты — парсер намерений личного ассист
 - Задача (task) — это дело/напоминание без конкретного времени-слота; встреча (event) — это про календарь, со временем начала. «Созвон в 15:00», «встреча с врачом завтра в 10» → create_event. «Купить молоко», «полить цветы» → create_task.
 - Заводить шаблон платежа через текст нельзя — это none.
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
+- is_action_request: поставь true, ТОЛЬКО когда пользователь просит ВЫПОЛНИТЬ действие (создать/записать/изменить/удалить что-то), но НИ ОДИН intent выше не подходит — например, разом завести несколько платежей (отдельной команды нет). Тогда верни {{"intent": "none", "is_action_request": true}}: бот честно откажет, а не сымитирует выполнение. Для обычного разговора, вопроса или болтовни — false.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null, "person": null, "direction": null, "follow_up_date": null, "related_project": null, "status": null, "text": null}}
+{{"intent": "...", "confidence": "high|low", "is_action_request": false, "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null, "person": null, "direction": null, "follow_up_date": null, "related_project": null, "status": null, "text": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -283,6 +284,11 @@ def parse_intent(llm, text: str, today: str | None = None) -> dict:
         unrecognized = isinstance(raw_intent, str) and raw_intent.strip() not in ("", "none")
         return {"intent": "none", "confidence": "high", "unrecognized": unrecognized}
     data["confidence"] = "low" if str(data.get("confidence", "")).strip().lower() == "low" else "high"
+    # (2) is_action_request: модель сама помечает «просьба о действии без подходящего
+    # intent» (напр. массовое создание платежей — отдельной команды нет). Нормализуем
+    # к bool (модель могла прислать строку "true"/"false"). Реальный Gemini для таких
+    # сообщений отдаёт чистый none, поэтому unrecognized не срабатывает — нужен явный флаг.
+    data["is_action_request"] = str(data.get("is_action_request")).strip().lower() == "true"
     return data
 
 
@@ -291,7 +297,9 @@ def route_after_resolve(intent_data: dict, resolution_kind: str) -> str:
 
     Возвращает:
       "handle" — резолв дал действие/ответ (execute/confirm/message): обрабатываем штатно;
-      "refuse" — это была команда, которой нет (unrecognized): честный отказ, НЕ chat;
+      "refuse" — это была команда, которой нет: честный отказ, НЕ chat. Два источника:
+                 unrecognized (модель выдала выдуманное имя intent) ИЛИ is_action_request
+                 (модель явно пометила «просьба о действии без подходящего intent», §(б)/(2));
       "chat"   — обычная болтовня (genuine none): идём в chat/memory-пайплайн.
 
     Различие refuse/chat и есть лечение конфабуляции: chat-пайплайн без доступа к
@@ -299,9 +307,54 @@ def route_after_resolve(intent_data: dict, resolution_kind: str) -> str:
     """
     if resolution_kind != "chat":
         return "handle"
-    if intent_data.get("unrecognized"):
+    if intent_data.get("unrecognized") or intent_data.get("is_action_request"):
         return "refuse"
     return "chat"
+
+
+# (1) Детерминированный выходной guard chat-пайплайна — последняя линия защиты §(б).
+# Глаголы-«я выполнил действие со стором», которых на chat-пути быть не может: бот
+# без доступа к задачам/платежам/календарю их не совершал. Ловим ПРОШЕДШЕЕ совершённое
+# («записал», «создал»), а не инфинитив («не могу записать» — это честный отказ, не
+# трогаем) и не второе лицо («ты добавил» — про пользователя). Плюс ложное обещание
+# «напомню тебе о …» (никакого напоминания не заведено). Память («запомнил») сюда НЕ
+# входит — её реально пишет facts-экстрактор отдельным путём, это легитимно.
+_ACTION_CLAIM = re.compile(
+    r"\b("
+    r"записал[ао]?|создал[ао]?|добавил[ао]?|отметил[ао]?|"
+    r"занёс|занес|занесл[ао]|внёс|внес|внесл[ао]|"
+    r"сохранил[ао]?|запланировал[ао]?|перенёс|перенес|перенесл[ао]|удалил[ао]?"
+    r")\b"
+    r"|напомню тебе о",
+    re.IGNORECASE,
+)
+# Второе лицо: если оно стоит в предложении ДО глагола — действие приписано
+# пользователю («ты уже добавил»), а не боту. Это не имитация, не трогаем.
+_SECOND_PERSON = re.compile(r"\b(ты|вы|тебе|тобой|вами)\b", re.IGNORECASE)
+
+CHAT_GUARD_REFUSAL = (
+    "Честно говоря, я не могу сам выполнить это действие — в режиме разговора у меня "
+    "нет доступа к задачам, платежам и календарю, поэтому ничего не записал. "
+    "Сделай это поддерживаемой командой или вручную."
+)
+
+
+def guard_chat_answer(answer: str) -> str:
+    """§(б), уровень (1): если ответ модели УТВЕРЖДАЕТ, что выполнил действие со
+    стором (а на chat-пути доступа к сторам нет — значит это конфабуляция), заменяем
+    его честным отказом. Детерминированно и независимо от того, сработал ли сигнал
+    is_action_request (2): последняя линия защиты, не полагается на послушание LLM.
+
+    Разбираем по предложениям: глагол совершённого действия считаем имитацией, только
+    если перед ним в этом же предложении нет второго лица («ты добавил» — про юзера)."""
+    for sentence in re.split(r"(?<=[.!?])\s+", answer):
+        m = _ACTION_CLAIM.search(sentence)
+        if m is None:
+            continue
+        if _SECOND_PERSON.search(sentence[: m.start()]):
+            continue  # действие приписано пользователю, а не боту
+        return CHAT_GUARD_REFUSAL
+    return answer
 
 
 def format_tasks(items: list[dict]) -> str:
