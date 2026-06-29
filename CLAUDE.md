@@ -28,9 +28,11 @@ memory/        obsidian.py (файлы) + chroma.py (индекс) + manager.py 
 web/           server.py — FastAPI (чат + просмотр памяти)
 intents.py     свободный текст → JSON-намерение → IntentRouter → действие над сторами
 tasks.py       TaskStore (tasks.db); bills.py BillStore (bills.db); inbox.py InboxStore (inbox.db)
+recurring.py   RecurringTaskStore (recurring.db) — повторяющиеся задачи (§18.2), отдельно от Bills
 contacts.py    ContactStore (contacts.db) — лёгкий CRM (§14)
 suggestions.py проактивные подсказки из заметок (§13): кластеризация journal-тем
 logger.py      ActionLog (actions.db) — журнал мутаций + undo_last (§10)
+scheduler_utils.py  тихие часы (§18.3): is_quiet_now + quiet_defer (отложить job до конца окна)
 calendar_client.py  Google Calendar (опц., token.json); voice.py — голос → Gemini-транскрипция
 ```
 
@@ -38,9 +40,12 @@ calendar_client.py  Google Calendar (опц., token.json); voice.py — голо
 логируются в `ActionLog` и отменяемы через `undo_last` (`edit_last` правит одно поле
 последнего действия — тоже как обычный update, отменяем). Выполнить сразу или
 переспросить — решает декларативная таблица `RISK_LEVELS` (safe/medium/dangerous) в
-начале `intents.py` через единый шлюз `_gate`, а не разрозненные `if` (§17). Ежедневные
-job'ы (платежи, ДР, проактивные подсказки) и напоминания о встречах — в
-`bot/telegram_bot.py`.
+начале `intents.py` через единый шлюз `_gate`, а не разрозненные `if` (§17). `snooze`
+(§18.1) — отложить последнюю задачу: переиспользует `edit_last`-путь, нормализуя
+относительный offset в due_date/due_time. Ежедневные job'ы (платежи, ДР, проактивные
+подсказки, генерация/очистка повторяющихся задач §18.2) и напоминания о встречах — в
+`bot/telegram_bot.py`. Все job'ы, шлющие в Telegram, обёрнуты `quiet_defer` (тихие
+часы §18.3): в окно молчания доставка откладывается на его конец, не теряясь.
 
 ## Команды
 

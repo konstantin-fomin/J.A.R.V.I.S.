@@ -144,6 +144,7 @@ class Handlers:
         suggestlog=None,
         contacts=None,
         reads=None,
+        recurring=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -155,8 +156,10 @@ class Handlers:
         self.suggestlog = suggestlog  # SuggestionLog | None — лог проактивных подсказок
         self.contacts = contacts      # ContactStore | None — лёгкий CRM
         self.reads = reads            # ReadStore | None — read-it-later
+        self.recurring = recurring    # RecurringTaskStore | None — повторяющиеся задачи
         self.action_log = action_log  # ActionLog | None — нужен для weekly review
-        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts, reads)
+        self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts, reads,
+                                   recurring)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):

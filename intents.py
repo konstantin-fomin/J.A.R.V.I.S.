@@ -9,6 +9,7 @@
 """
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
@@ -42,6 +43,10 @@ INTENTS = {
     "query_reads",
     "mark_read",
     "query_weekly_review",
+    "create_recurring_task",
+    "query_recurring_tasks",
+    "delete_recurring_template",
+    "snooze",
     "undo_last",
     "edit_last",
     "none",
@@ -74,6 +79,10 @@ RISK_LEVELS = {
     "query_reads": "safe",
     "mark_read": "medium",
     "query_weekly_review": "safe",
+    "create_recurring_task": "medium",
+    "query_recurring_tasks": "safe",
+    "delete_recurring_template": "dangerous",
+    "snooze": "medium",
 }
 
 # edit_last (§17): какие поля какой сущности можно править у последнего действия и
@@ -117,6 +126,45 @@ _LOGGED = {
     "mark_read": ("read", "update"),
 }
 
+# Snooze/defer (§18.1): именованные относительные смещения → (через сколько дней
+# от сегодня, время). None во времени — «не трогать время задачи». Длительности
+# («2h», «30m», «3d») обрабатываются отдельно регуляркой ниже.
+_SNOOZE_NAMED = {
+    "afternoon": (0, "15:00"),
+    "evening": (0, "19:00"),
+    "tonight": (0, "21:00"),
+    "morning": (1, "09:00"),
+    "tomorrow": (1, None),
+    "next_week": (7, None),
+}
+_SNOOZE_DURATION = re.compile(r"^\+?(\d+)\s*([mhd])$")
+
+
+def normalize_snooze_offset(offset: str, now: datetime) -> dict | None:
+    """Относительный offset от Gemini → конкретные {due_date[, due_time]} от now.
+
+    Канонические значения: именованные (evening/morning/tomorrow/next_week/…) и
+    длительности «<N>m|h|d» (с необязательным «+»). m/h ставят и дату, и время;
+    d/именованные tomorrow/next_week — только дату (время задачи не трогаем).
+    Не распознали — None (роутер ответит честным сообщением, не делая no-op)."""
+    key = (offset or "").strip().lower()
+    if key in _SNOOZE_NAMED:
+        days, t = _SNOOZE_NAMED[key]
+        result = {"due_date": (now.date() + timedelta(days=days)).isoformat()}
+        if t is not None:
+            result["due_time"] = t
+        return result
+    m = _SNOOZE_DURATION.match(key)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if unit == "d":  # дни — смещаем дату, время не трогаем
+            return {"due_date": (now.date() + timedelta(days=n)).isoformat()}
+        delta = timedelta(minutes=n) if unit == "m" else timedelta(hours=n)
+        target = now + delta
+        return {"due_date": target.date().isoformat(), "due_time": target.strftime("%H:%M")}
+    return None
+
+
 PROMPT = """Ты — парсер намерений личного ассистента. Определи, что пользователь \
 хочет сделать, и верни ТОЛЬКО один JSON-объект без markdown и пояснений.
 
@@ -143,6 +191,10 @@ PROMPT = """Ты — парсер намерений личного ассист
 - query_reads — показать список «почитать» («что у меня в почитать», «непрочитанные ссылки»). Полей нет.
 - mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
 - query_weekly_review — сводка/итоги за неделю («сводка за неделю», «что у меня было на этой неделе», «подведи итоги недели»). Полей нет.
+- create_recurring_task — завести ПОВТОРЯЮЩУЮСЯ задачу/привычку («каждый день…», «по понедельникам…», «каждое 15-е число…», «напоминай еженедельно…»). Поля: title, recurrence_type ("daily"|"weekly"|"monthly"), day_of_week (0=Пн..6=Вс — для weekly, иначе null), day_of_month (1..31 — для monthly, иначе null), time ("ЧЧ:ММ" или null), project (или null). Это про регулярность; разовое дело с датой — это create_task.
+- query_recurring_tasks — показать повторяющиеся задачи («какие у меня повторяющиеся задачи», «мои привычки», «что повторяется»). Полей нет.
+- delete_recurring_template — удалить повторяющуюся задачу («убери повторяющуюся задачу …», «отмени привычку …»). Поле: title_hint.
+- snooze — отложить ПОСЛЕДНЕЕ действие/задачу на потом, не повторяя его («отложи на вечер», «напомни через 2 часа», «не сегодня», «перенеси на завтра», «давай попозже»). Поле: offset — относительное смещение В КАНОНИЧЕСКОЙ ФОРМЕ, одно из: "evening" (вечер), "afternoon" (день), "tonight" (поздний вечер), "morning" (утро), "tomorrow" (завтра/«не сегодня»), "next_week" (через неделю), либо длительность вида "<N>m"/"<N>h"/"<N>d" («через 2 часа»→"2h", «через 30 минут»→"30m", «через 3 дня»→"3d"). НЕ абсолютная дата — именно относительное смещение.
 - undo_last — отменить последнее выполненное действие («отмени», «отмени последнее», «верни как было»). Полей нет.
 - edit_last — поправить ОДНО поле у последнего действия, не повторяя его («не завтра, а в пятницу», «сделай приоритет высоким», «переименуй в …», «добавь к прошлой заметке: …»). Поля: field, value. field — что меняем: "title" (название), "priority" ("low"|"normal"|"high"), "due_date" ("ГГГГ-ММ-ДД"), "due_time" ("ЧЧ:ММ"), "name" (имя контакта), "birthday" ("ГГГГ-ММ-ДД"), "note" (дописать к заметке контакта). value — новое значение (даты/время — в абсолютном виде, относительно «сегодня»).
 - none — это обычное сообщение/вопрос/разговор, а не команда.
@@ -159,7 +211,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -231,6 +283,28 @@ def format_contacts(items: list[dict], header: str) -> str:
     return "\n".join(lines)
 
 
+_WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def format_recurring(items: list[dict]) -> str:
+    """Список активных шаблонов повторяющихся задач (§18.2)."""
+    if not items:
+        return "Повторяющихся задач нет."
+    lines = ["🔁 Повторяющиеся задачи:", ""]
+    for t in items:
+        rtype = t["recurrence_type"]
+        if rtype == "weekly" and t["day_of_week"] is not None:
+            when = f"еженедельно ({_WEEKDAYS_RU[t['day_of_week']]})"
+        elif rtype == "monthly" and t["day_of_month"] is not None:
+            when = f"ежемесячно ({t['day_of_month']}-го)"
+        else:
+            when = {"daily": "ежедневно", "weekly": "еженедельно",
+                    "monthly": "ежемесячно"}.get(rtype, rtype)
+        at = f" в {t['time']}" if t["time"] else ""
+        lines.append(f"🔁 {t['title']} — {when}{at}")
+    return "\n".join(lines)
+
+
 def format_reads(items: list[dict]) -> str:
     """Список «почитать»: заголовок (или url) + саммари под ним."""
     if not items:
@@ -263,7 +337,7 @@ class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
     def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None,
-                 action_log=None, inbox=None, contacts=None, reads=None):
+                 action_log=None, inbox=None, contacts=None, reads=None, recurring=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
@@ -271,6 +345,7 @@ class IntentRouter:
         self.inbox = inbox        # InboxStore | None — быстрый захват
         self.contacts = contacts  # ContactStore | None — лёгкий CRM
         self.reads = reads        # ReadStore | None — read-it-later
+        self.recurring = recurring  # RecurringTaskStore | None — повторяющиеся задачи
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -305,6 +380,9 @@ class IntentRouter:
 
         if intent == "edit_last":
             return self._resolve_edit_last(data)
+
+        if intent == "snooze":
+            return self._resolve_snooze(data, low)
 
         if intent == "create_task":
             title = str(data.get("title") or "").strip()
@@ -396,6 +474,11 @@ class IntentRouter:
         if intent == "query_weekly_review":
             # read-only (safe); расчёт+саммари делает хендлер (у него есть LLM)
             return self._gate(intent, {"type": "query_weekly_review"}, "", low)
+
+        if intent in ("create_recurring_task", "query_recurring_tasks", "delete_recurring_template"):
+            if self.recurring is None:
+                return Resolution("message", text="Повторяющиеся задачи не настроены 🤔")
+            return self._resolve_recurring(intent, data, low)
 
         if intent in ("create_event", "move_event", "delete_event", "query_events"):
             if self.calendar is None:
@@ -581,6 +664,65 @@ class IntentRouter:
             )
         return Resolution("chat")
 
+    # --- Повторяющиеся задачи (§18.2) ----------------------------------------
+    # create — auto-or-confirm (medium); query — read-only (safe); delete —
+    # всегда Да/Нет (dangerous). Шаблоны в журнал не пишутся (как bill_templates):
+    # это конфигурация повторяемости, а не разовая мутация под undo.
+
+    _RECURRENCE_TYPES = {"daily", "weekly", "monthly"}
+
+    def _resolve_recurring(self, intent: str, data: dict, low: bool) -> Resolution:
+        assert self.recurring is not None  # resolve() гарантирует стор до вызова
+
+        if intent == "create_recurring_task":
+            title = str(data.get("title") or "").strip()
+            rtype = str(data.get("recurrence_type") or "").strip().lower()
+            if not title or rtype not in self._RECURRENCE_TYPES:
+                return Resolution("chat")  # нечего/непонятно как повторять — обычный чат
+            params = {"title": title, "recurrence_type": rtype}
+            for key in ("day_of_week", "day_of_month", "time", "project"):
+                if data.get(key) is not None:
+                    params[key] = data[key]
+            return self._gate(
+                intent, {"type": "create_recurring_template", "params": params},
+                f"создать повторяющуюся задачу «{title}» ({rtype})?", low,
+            )
+
+        if intent == "query_recurring_tasks":
+            return self._gate(intent, {"type": "query_recurring_tasks"}, "", low)
+
+        if intent == "delete_recurring_template":
+            hint = (data.get("title_hint") or data.get("title") or "").strip().lower()
+            matches = [t for t in self.recurring.list_templates()
+                       if hint and hint in t["title"].lower()]
+            if not matches:
+                return Resolution("message", text=f"Не нашёл повторяющуюся задачу похожую на «{hint}».")
+            if len(matches) > 1:
+                titles = ", ".join(f"«{t['title']}»" for t in matches[:5])
+                return Resolution("message", text=f"Нашёл несколько: {titles}. Уточни, какую именно.")
+            t = matches[0]
+            return self._gate(
+                intent,
+                {"type": "delete_recurring_template", "template_id": t["id"], "title": t["title"]},
+                f"удалить повторяющуюся задачу «{t['title']}»?", low,
+            )
+        return Resolution("chat")
+
+    def _apply_recurring(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
+        """Действия над шаблонами повторяющихся задач. В журнал не пишутся
+        (нет в _LOGGED), поэтому entity_id/after не важны — возвращаем как read-only."""
+        assert self.recurring is not None
+        kind = action["type"]
+        if kind == "create_recurring_template":
+            t = self.recurring.create_template(**action["params"])
+            return f"🔁 Создал повторяющуюся задачу: «{t['title']}» ({t['recurrence_type']})", \
+                None, None, False
+        if kind == "delete_recurring_template":
+            self.recurring.delete_template(action["template_id"])
+            return f"🗑 Удалил повторяющуюся задачу: «{action['title']}»", None, None, False
+        # query_recurring_tasks — read-only
+        return format_recurring(self.recurring.list_templates(active_only=True)), None, None, False
+
     # --- Отмена последнего действия (undo_last) ------------------------------
     # Берём самую свежую запись журнала status='active', строим обратное
     # действие и помечаем запись undone (это делает execute по маркеру
@@ -623,6 +765,29 @@ class IntentRouter:
         if action is None:  # сущность есть, но править её этим путём нечем
             return Resolution("message", text="К последнему действию это изменение не подходит 🤔")
         return Resolution("execute", action=action)
+
+    # --- Отложить последнее действие (snooze/defer, §18.1) -------------------
+    # Тот же latest_active(), что и edit_last, но value не произвольный, а
+    # предустановленный нормализатором offset → due_date/due_time. Применимо
+    # только к задаче; строит обычный edit_task (логируется как update, отменяемо
+    # через undo_last). Risk medium (как edit) — сразу при confidence != low.
+
+    def _resolve_snooze(self, data: dict, low: bool) -> Resolution:
+        if self.log is None:
+            return Resolution("message", text="Журнал действий не ведётся — нечего откладывать.")
+        rec = self.log.latest_active()
+        if rec is None:
+            return Resolution("message", text="Нет последнего действия, которое можно отложить.")
+        fields = normalize_snooze_offset(str(data.get("offset") or ""), datetime.now())
+        if not fields:
+            return Resolution("message", text="Не понял, на когда отложить 🤔")
+        if rec["entity_type"] != "task":
+            return Resolution("message", text="Отложить можно только задачу/напоминание 🤔")
+        title = (rec.get("after_state") or rec.get("before_state") or {}).get("title", "")
+        action = {"type": "edit_task", "task_id": int(rec["entity_id"]),
+                  "fields": fields, "title": title}
+        when = fields["due_date"] + (f" {fields['due_time']}" if fields.get("due_time") else "")
+        return self._gate("snooze", action, f"отложить «{title}» на {when}?", low)
 
     def _build_edit(self, rec: dict, column: str, mode: str, value) -> dict | None:
         """Действие-обновление для edit_last: подставляет новое значение поля
@@ -918,6 +1083,8 @@ class IntentRouter:
             return self._apply_contact(action)
         if kind in ("save_link", "mark_read", "restore_read", "delete_read", "query_reads"):
             return self._apply_read(action)
+        if kind in ("create_recurring_template", "delete_recurring_template", "query_recurring_tasks"):
+            return self._apply_recurring(action)
         if kind == "mark_bill_paid":
             after = self.bills.set_status(action["instance_id"], "paid")
             return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True

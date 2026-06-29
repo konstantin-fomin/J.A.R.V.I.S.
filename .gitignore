@@ -27,6 +27,9 @@ contacts.db-wal
 reads.db
 reads.db-journal
 reads.db-wal
+recurring.db
+recurring.db-journal
+recurring.db-wal
 K:/OBSIDIAN/
 
 # Python

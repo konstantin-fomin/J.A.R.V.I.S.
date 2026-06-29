@@ -32,6 +32,8 @@ from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from reads import ReadStore
+from recurring import RecurringTaskStore
+from scheduler_utils import quiet_defer
 from suggestions import ProactiveSuggester, SuggestionLog, build_suggestion_text, propose_label
 from tasks import TaskStore
 from weekly_review import compose_summary, compute_week_stats, format_review
@@ -53,6 +55,14 @@ READS_DIGEST_TIME = time(hour=11, minute=0)
 # Еженедельная сводка (§16): воскресенье вечером. Отдельное от reads_digest время,
 # чтобы не прислать два сообщения подряд.
 WEEKLY_REVIEW_TIME = time(hour=19, minute=0)
+
+# Повторяющиеся задачи (§18.2): ранний утренний прогон генерации инстансов на
+# сегодня и чуть позже — очистка старой выполненной истории. Оба job'а ничего не
+# шлют в Telegram, поэтому тихих часов не касаются.
+RECURRING_GENERATE_TIME = time(hour=0, minute=5)
+RECURRING_CLEANUP_TIME = time(hour=4, minute=0)
+# Сколько дней хранить выполненные recurring-инстансы перед очисткой.
+RECURRING_KEEP_DAYS = 30
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
@@ -94,6 +104,8 @@ async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     Уже разосланные напоминания хранятся в job.data['reminded'], чтобы не
     дублировать между запусками (множество сбрасывается на рестарте бота)."""
+    if quiet_defer(context, remind_events):
+        return
     data = context.job.data
     calendar = data["calendar"]
     reminded: set = data["reminded"]
@@ -128,6 +140,8 @@ async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в день: если на завтра есть неоплаченные начисления — напомнить."""
+    if quiet_defer(context, remind_bills):
+        return
     bills: BillStore = context.job.data
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
@@ -147,6 +161,8 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в день: если у кого-то из контактов ДР в ближайшие N дней — напомнить (§14)."""
+    if quiet_defer(context, birthday_reminder):
+        return
     contacts: ContactStore = context.job.data
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
@@ -168,6 +184,8 @@ async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в неделю: дайджест непрочитанных ссылок (§15). Саммари уже лежит в БД
     (посчитано при сохранении) — здесь только показываем. У каждой записи кнопка
     «✓ Прочитано». Пусто — молчим."""
+    if quiet_defer(context, reads_digest):
+        return
     reads: ReadStore = context.job.data
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
@@ -197,6 +215,8 @@ async def weekly_review(context: ContextTypes.DEFAULT_TYPE) -> None:
     Цифры считает compute_week_stats (чистый Python над сторами), compose_summary
     оборачивает их через Gemini. LLM упал — шлём детерминированный format_review.
     Тяжёлое (SQLite + LLM) уводим в поток, чтобы не блокировать event loop."""
+    if quiet_defer(context, weekly_review):
+        return
     data = context.job.data
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
@@ -225,6 +245,8 @@ async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
     пользователя): иначе краш/рестарт бота между показом и ответом мог бы
     предложить ту же тему повторно. find_suggestions блокирующий (читает индекс
     и дёргает LLM для формулировки) — уводим в поток."""
+    if quiet_defer(context, suggest_from_notes):
+        return
     suggester: ProactiveSuggester = context.job.data
     chat_id = config.ALLOWED_USER_ID
     if chat_id is None:
@@ -251,6 +273,27 @@ async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
         suggester.log.mark_suggested(s["hash"], s["label"])
 
 
+async def generate_recurring_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в день: генерирует task-инстансы на сегодня из активных recurring-шаблонов
+    (§18.2). Ничего не шлёт пользователю — тихих часов не касается."""
+    data = context.job.data
+    recurring: RecurringTaskStore = data["recurring"]
+    tasks: TaskStore = data["tasks"]
+    created = await asyncio.to_thread(recurring.ensure_day, date.today(), tasks)
+    if created:
+        logger.info("Повторяющиеся задачи: создано инстансов на сегодня — %d", created)
+
+
+async def cleanup_recurring_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в день: удаляет выполненные recurring-инстансы старше RECURRING_KEEP_DAYS
+    (§18.2). Обычные задачи не трогает. Ничего не шлёт пользователю."""
+    tasks: TaskStore = context.job.data
+    cutoff = (date.today() - timedelta(days=RECURRING_KEEP_DAYS)).isoformat()
+    removed = await asyncio.to_thread(tasks.purge_recurring_done, cutoff)
+    if removed:
+        logger.info("Повторяющиеся задачи: вычищено старых выполненных инстансов — %d", removed)
+
+
 def build_application(
     token: str,
     memory: MemoryManager,
@@ -263,6 +306,7 @@ def build_application(
     inbox=None,
     contacts=None,
     reads=None,
+    recurring=None,
 ) -> Application:
     # Проактивные подсказки (§13): лог общий для job (показ/пометка) и хендлеров
     # (кнопка «Да» достаёт формулировку темы по hash). Тема формулируется LLM.
@@ -277,7 +321,7 @@ def build_application(
         repeat_block_days=config.SUGGEST_REPEAT_BLOCK_DAYS,
     )
     handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox,
-                        suggest_log, contacts, reads)
+                        suggest_log, contacts, reads, recurring)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -330,6 +374,17 @@ def build_application(
                   "reads": reads, "log": action_log, "llm": llm},
             name="weekly_review",
         )
+        # Повторяющиеся задачи (§18.2): генерация инстансов на сегодня + очистка
+        # старой выполненной истории. Оба — если стор настроен; сообщений не шлют.
+        if recurring is not None:
+            app.job_queue.run_daily(
+                generate_recurring_tasks, time=RECURRING_GENERATE_TIME,
+                data={"recurring": recurring, "tasks": tasks}, name="generate_recurring_tasks",
+            )
+            app.job_queue.run_daily(
+                cleanup_recurring_tasks, time=RECURRING_CLEANUP_TIME, data=tasks,
+                name="cleanup_recurring_tasks",
+            )
         # Напоминания о встречах — только если календарь настроен
         if calendar is not None:
             app.job_queue.run_repeating(
@@ -359,10 +414,11 @@ def run_bot(
     inbox=None,
     contacts=None,
     reads=None,
+    recurring=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts, reads).run_polling(
+                      inbox, contacts, reads, recurring).run_polling(
         drop_pending_updates=True
     )
 
@@ -379,12 +435,13 @@ def run_bot_in_thread(
     inbox=None,
     contacts=None,
     reads=None,
+    recurring=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts, reads).run_polling(
+                      inbox, contacts, reads, recurring).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

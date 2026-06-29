@@ -76,10 +76,14 @@ def test_compute_full_scenario(tmp_path):
     reads.create(url="u1", title="A"); reads.create(url="u2", title="B")
     reads.create(url="u3", title="C", status="read")
 
-    # действия за неделю (timestamp = сейчас → в окне END)
-    log.log_action(source="telegram", entity_type="task", entity_id="1", action="create")
-    log.log_action(source="telegram", entity_type="task", entity_id="1", action="update")
-    log.log_action(source="telegram", entity_type="bill", entity_id="1", action="mark_paid")
+    # действия за неделю: timestamp пишется как «сейчас», поэтому фиксируем его
+    # внутрь окна напрямую (иначе тест — бомба замедленного действия: как только
+    # текущая дата уходит за END, реальные now-таймстемпы выпадают из окна).
+    a1 = log.log_action(source="telegram", entity_type="task", entity_id="1", action="create")
+    a2 = log.log_action(source="telegram", entity_type="task", entity_id="1", action="update")
+    a3 = log.log_action(source="telegram", entity_type="bill", entity_id="1", action="mark_paid")
+    for rec in (a1, a2, a3):
+        _set(tmp_path / "a.db", "action_log", "timestamp", "2026-06-25T09:00:00+00:00", rec["id"])
 
     stats = compute_week_stats(START, END, tasks=tasks, bills=bills,
                                contacts=contacts, reads=reads, log=log)

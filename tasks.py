@@ -32,15 +32,18 @@ class TaskStore:
                     due_time TEXT,
                     source TEXT NOT NULL DEFAULT 'telegram',
                     project TEXT,
+                    recurring_template_id INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
-            # Миграция старых баз: добавляем project, если колонки ещё нет.
+            # Миграция старых баз: добавляем project / recurring_template_id, если колонок ещё нет.
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "project" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN project TEXT")
+            if "recurring_template_id" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN recurring_template_id INTEGER")
 
     def create(
         self,
@@ -51,14 +54,17 @@ class TaskStore:
         priority: str = "normal",
         source: str = "telegram",
         project: Optional[str] = None,
+        recurring_template_id: Optional[int] = None,
     ) -> dict:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO tasks "
-                "(title, description, status, priority, due_date, due_time, source, project, created_at, updated_at) "
-                "VALUES (?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)",
-                (title, description, priority, due_date, due_time, source, project, now, now),
+                "(title, description, status, priority, due_date, due_time, source, project, "
+                "recurring_template_id, created_at, updated_at) "
+                "VALUES (?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (title, description, priority, due_date, due_time, source, project,
+                 recurring_template_id, now, now),
             )
             task_id = cur.lastrowid
         return self.get(task_id)
@@ -96,3 +102,25 @@ class TaskStore:
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         return cur.rowcount > 0
+
+    def recurring_exists(self, template_id: int, due_date: str) -> bool:
+        """Есть ли уже инстанс этого recurring-шаблона на эту дату (для идемпотентной
+        генерации в RecurringTaskStore.ensure_day)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM tasks WHERE recurring_template_id = ? AND due_date = ? LIMIT 1",
+                (template_id, due_date),
+            ).fetchone()
+        return row is not None
+
+    def purge_recurring_done(self, before_date: str) -> int:
+        """Удаляет ВЫПОЛНЕННЫЕ инстансы recurring-шаблонов с due_date раньше
+        before_date. Обычные задачи (source != 'recurring') не трогает — даже
+        старые и выполненные. Возвращает число удалённых."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE source = 'recurring' AND status = 'done' "
+                "AND due_date IS NOT NULL AND due_date < ?",
+                (before_date,),
+            )
+        return cur.rowcount

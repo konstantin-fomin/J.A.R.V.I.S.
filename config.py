@@ -98,6 +98,15 @@ CALENDAR_TIMEZONE = os.getenv("CALENDAR_TIMEZONE", "Europe/Moscow")
 CALENDAR_REMINDER_LEAD_MINUTES = int(os.getenv("CALENDAR_REMINDER_LEAD_MINUTES") or 15)
 CALENDAR_REMINDER_INTERVAL = int(os.getenv("CALENDAR_REMINDER_INTERVAL") or 300)
 
+# Тихие часы (§18.3): в этот интервал бот не шлёт уведомления, а откладывает их
+# доставку на момент QUIET_HOURS_END. Окно может переходить через полночь
+# (start > end). Формат ЧЧ:ММ. Дефолт — ночь с 23:00 до 09:00.
+QUIET_HOURS_START = os.getenv("QUIET_HOURS_START", "23:00")
+QUIET_HOURS_END = os.getenv("QUIET_HOURS_END", "09:00")
+
+# Повторяющиеся задачи (§18.2). SQLite, отдельно от остальных сторов.
+RECURRING_DB_PATH = Path(os.getenv("RECURRING_DB_PATH") or (BASE_DIR / "recurring.db"))
+
 # Память
 MAX_MEMORY_RESULTS = 5       # сколько воспоминаний подгружать
 MAX_HISTORY_MESSAGES = 10    # сколько последних сообщений хранить в контексте
