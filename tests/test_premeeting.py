@@ -99,6 +99,20 @@ def test_query_combines_title_and_description():
     assert "Созвон" in rec.query and "лендинг" in rec.query
 
 
+# --- ведущий markdown-заголовок чанка не показываем в сниппете ----------------
+
+def test_snippet_strips_leading_markdown_header():
+    # Содержательные чанки хранятся вместе со своим заголовком секции («## Заметки»)
+    # для контекста эмбеддинга — но в сниппете напоминания заголовок не нужен,
+    # показываем сам текст заметки (см. баг §12: «Из твоих заметок: ## Заметки»).
+    m = mm([("## Заметки\n- Пётр ждёт ответ по офферу", "topics/work.md", 0.2)])
+    text = build_reminder_text(event("Встреча с Петром", dt(10)), 15, m,
+                               notes_count=3, max_distance=0.6)
+    bullet = next(line for line in text.splitlines() if line.startswith("• "))
+    assert "#" not in bullet                 # заголовок секции выкинут
+    assert "Пётр ждёт ответ по офферу" in bullet
+
+
 # --- длинные заметки сокращаются ---------------------------------------------
 
 def test_long_note_is_truncated_to_one_short_bullet():

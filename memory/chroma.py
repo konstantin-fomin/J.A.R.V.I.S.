@@ -6,6 +6,7 @@
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -13,9 +14,28 @@ import chromadb
 
 CHUNK_MAX_CHARS = 800
 
+# Строка-заголовок markdown: 1–6 решёток и дальше пробел+текст или конец строки
+# («## Факты», «###»). Hashtag без пробела («#тег») заголовком НЕ считается.
+_HEADER_RE = re.compile(r"^#{1,6}(\s|$)")
+
+
+def _has_content(chunk: str) -> bool:
+    """В чанке есть смысловой текст, а не только заголовки пустых секций.
+
+    Пустая секция шаблона («## Факты», «## Заметки» в about_me.md/goals.md/темах)
+    нарезается в чанк из одного заголовка. Эмбеддить его нельзя: короткие общие
+    слова заголовков ложно близки к любому запросу (замерено — ближе реального
+    контента), порогом релевантности их не отсечь. Поэтому фильтруем на индексации.
+    """
+    return any(line.strip() and not _HEADER_RE.match(line.strip())
+               for line in chunk.splitlines())
+
 
 def _chunk_markdown(content: str) -> list[str]:
-    """Режет markdown на куски: по заголовкам, крупные секции — по абзацам."""
+    """Режет markdown на куски: по заголовкам, крупные секции — по абзацам.
+
+    Чанки из одних заголовков (пустые секции) в результат не попадают — они не
+    несут смысла и засоряют семантический поиск (см. _has_content)."""
     sections: list[str] = []
     current: list[str] = []
     for line in content.splitlines():
@@ -42,7 +62,7 @@ def _chunk_markdown(content: str) -> list[str]:
             buf += para + "\n"
         if buf.strip():
             chunks.append(buf.strip())
-    return chunks
+    return [c for c in chunks if _has_content(c)]
 
 
 class ChromaIndex:

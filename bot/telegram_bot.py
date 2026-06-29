@@ -69,8 +69,15 @@ PREMEETING_SNIPPET_MAX = 120
 
 
 def _snippet(text: str) -> str:
-    """Однострочный короткий фрагмент заметки для перечисления под напоминанием."""
-    flat = " ".join(text.split())
+    """Однострочный короткий фрагмент заметки для перечисления под напоминанием.
+
+    Содержательные чанки хранятся вместе со своим заголовком секции («## Заметки»)
+    для контекста эмбеддинга — но в напоминании заголовок не нужен: выкидываем
+    ведущие markdown-заголовки и показываем сам текст заметки (§12)."""
+    lines = text.splitlines()
+    while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
+        lines.pop(0)
+    flat = " ".join("\n".join(lines).split())
     if len(flat) <= PREMEETING_SNIPPET_MAX:
         return flat
     return flat[: PREMEETING_SNIPPET_MAX - 1].rstrip() + "…"
