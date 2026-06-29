@@ -79,8 +79,17 @@ stage "/opt/amnezia-dns-forwarder" "amnezia/dns-forwarder"
 
 # --- 3. jarvis ----------------------------------------------------------------
 stage "${JARVIS_DIR}/bot-memory"        "jarvis/bot-memory"
+# Все SQLite-сторы, смонтированные в docker-compose.yml, должны быть здесь —
+# инвариант проверяет tests/test_backup_coverage.py (завёл стор → добавь stage).
 stage "${JARVIS_DIR}/tasks.db"          "jarvis/tasks.db"
 stage "${JARVIS_DIR}/bills.db"          "jarvis/bills.db"
+stage "${JARVIS_DIR}/actions.db"        "jarvis/actions.db"
+stage "${JARVIS_DIR}/inbox.db"          "jarvis/inbox.db"
+stage "${JARVIS_DIR}/suggestions.db"    "jarvis/suggestions.db"
+stage "${JARVIS_DIR}/contacts.db"       "jarvis/contacts.db"
+stage "${JARVIS_DIR}/reads.db"          "jarvis/reads.db"
+stage "${JARVIS_DIR}/recurring.db"      "jarvis/recurring.db"
+stage "${JARVIS_DIR}/obligations.db"    "jarvis/obligations.db"
 stage "${JARVIS_DIR}/token.json"        "jarvis/token.json"
 stage "${JARVIS_DIR}/credentials.json"  "jarvis/credentials.json"
 stage "${JARVIS_DIR}/.env"              "jarvis/.env"
