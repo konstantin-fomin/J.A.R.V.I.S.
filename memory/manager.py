@@ -49,6 +49,19 @@ class MemoryManager:
         self.index.reindex_file(rel_path, self.vault.read_file(rel_path))
         return True
 
+    def add_decision(self, rel_path: str, content: str) -> str:
+        """Пишет заметку-решение (§19.3) в decisions/ и переиндексирует её тем же
+        ChromaIndex, что и остальную память. Возвращает относительный путь."""
+        self.vault.write_file(rel_path, content)
+        self.index.reindex_file(rel_path, content)
+        return rel_path
+
+    def search_decisions(self, query: str, k: int = 5) -> list[tuple[str, str]]:
+        """Семантический поиск, отфильтрованный по папке decisions/. Берём с запасом
+        (поиск общий по всей памяти) и оставляем только куски из журнала решений."""
+        results = self.index.search(query, k * 4)
+        return [(text, file) for text, file in results if file.startswith("decisions/")][:k]
+
     def goals(self) -> str:
         """Содержимое goals.md (пустая строка, если файла нет)."""
         try:

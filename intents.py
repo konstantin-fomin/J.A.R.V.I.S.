@@ -39,6 +39,13 @@ INTENTS = {
     "update_contact",
     "query_contacts",
     "delete_contact",
+    "create_obligation",
+    "query_obligations",
+    "complete_obligation",
+    "delete_obligation",
+    "inbox_reclassify",
+    "log_decision",
+    "query_decisions",
     "save_link",
     "query_reads",
     "mark_read",
@@ -75,6 +82,13 @@ RISK_LEVELS = {
     "update_contact": "medium",
     "query_contacts": "safe",
     "delete_contact": "dangerous",
+    "create_obligation": "medium",
+    "query_obligations": "safe",
+    "complete_obligation": "medium",
+    "delete_obligation": "dangerous",
+    "inbox_reclassify": "medium",
+    "log_decision": "safe",
+    "query_decisions": "safe",
     "save_link": "safe",
     "query_reads": "safe",
     "mark_read": "medium",
@@ -103,6 +117,14 @@ _EDIT_LAST_FIELDS = {
     },
 }
 
+# Статусы разбора инбокса (§19.2) сверх pending/processed и их человекочитаемые
+# подписи. inbox_reclassify принимает только эти значения; остальное — честный отказ.
+INBOX_REVIEW_STATUSES = {
+    "someday": "💤 когда-нибудь",
+    "needs_decision": "🤔 нужно решить",
+    "maybe_later": "⏳ может быть потом",
+}
+
 # Окно (дней) для запроса «у кого скоро ДР» — шире, чем у ежедневного напоминания
 # (config.BIRTHDAY_REMINDER_LEAD_DAYS), чтобы «покажи ближайшие ДР» давал обзор.
 CONTACT_QUERY_BIRTHDAY_DAYS = 30
@@ -122,6 +144,11 @@ _LOGGED = {
     "create_contact": ("contact", "create"),
     "update_contact": ("contact", "update"),
     "delete_contact": ("contact", "delete"),
+    "capture": ("inbox", "create"),
+    "reclassify_inbox": ("inbox", "update"),
+    "create_obligation": ("obligation", "create"),
+    "complete_obligation": ("obligation", "update"),
+    "delete_obligation": ("obligation", "delete"),
     "save_link": ("read", "create"),
     "mark_read": ("read", "update"),
 }
@@ -187,6 +214,13 @@ PROMPT = """Ты — парсер намерений личного ассист
 - update_contact — отметить, что пообщался с человеком, и/или дописать заметку («созвонился с …», «виделся с …», «заметка про …»). Поля: name_hint (кто), note (что дописать или null). last_contact_date выставится на сегодня автоматически.
 - query_contacts — показать контакты. Поле: filter ("upcoming_birthdays" — у кого скоро день рождения | "by_name" — поиск по имени | null — все). Для by_name заполни name.
 - delete_contact — удалить контакт. Поле: name_hint.
+- create_obligation — записать обязательство: чего ты ЖДЁШЬ от человека или что ТЫ кому-то должен («жду от Пети отчёт», «Маша должна мне денег» → waiting_on; «я должен Васе книгу», «надо вернуть долг Маше» → i_owe). Это про отношения с человеком, а не дело со сроком (то — create_task). Поля: title (что именно), person (кто), direction ("waiting_on" — жду от кого-то | "i_owe" — я должен), follow_up_date ("ГГГГ-ММ-ДД" — когда напомнить, или null), related_project (тема или null).
+- query_obligations — показать обязательства («кто мне должен», «что я кому должен», «чего я жду от Пети»). Поля: direction ("waiting_on" | "i_owe" | null — все), person (фильтр по человеку или null).
+- complete_obligation — закрыть обязательство («Петя прислал отчёт», «вернул долг Маше», «закрой обязательство …»). Поле: title_hint (по сути/человеку).
+- delete_obligation — удалить запись обязательства («убери обязательство …»). Поле: title_hint.
+- inbox_reclassify — переразобрать ПОСЛЕДНЮЮ запись инбокса: это не задача, а мысль на потом («это не задача, отложи подумать», «убери из задач, пусть полежит», «это на когда-нибудь»). Поле: status — куда отложить: "someday" (когда-нибудь), "needs_decision" (нужно решить), "maybe_later" (может быть потом).
+- log_decision — записать ПРИНЯТОЕ решение в журнал решений («запиши решение: …», «зафиксируй: решили …», «для протокола: выбрали …»). Поле: text — исходная формулировка решения (с причиной/альтернативами, если есть).
+- query_decisions — найти прошлое решение и его обоснование («почему мы отказались от X», «какие решения по Y», «что мы решили насчёт …»). Поле: text — суть вопроса.
 - save_link — сохранить ссылку «на потом» / «почитать позже» / «в закладки». Срабатывает ТОЛЬКО если в сообщении есть URL И явный контекст отложенного чтения («почитаю потом», «на потом», «сохрани ссылку», «в закладки»). Просто URL без такого контекста — НЕ save_link (это обычное сообщение none). Поле: url (сам адрес).
 - query_reads — показать список «почитать» («что у меня в почитать», «непрочитанные ссылки»). Полей нет.
 - mark_read — отметить сохранённую ссылку прочитанной («прочитал статью про …», «отметь … прочитанным»). Поле: title_hint (по заголовку/теме ссылки).
@@ -211,7 +245,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null}}
+{{"intent": "...", "confidence": "high|low", "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null, "person": null, "direction": null, "follow_up_date": null, "related_project": null, "status": null, "text": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -283,6 +317,19 @@ def format_contacts(items: list[dict], header: str) -> str:
     return "\n".join(lines)
 
 
+def format_obligations(items: list[dict], header: str) -> str:
+    """Список обязательств (§19.1): кто/что + направление + дата follow-up."""
+    if not items:
+        return "Обязательств нет."
+    arrows = {"waiting_on": "⏳ жду от", "i_owe": "💸 я должен"}
+    lines = [header, ""]
+    for o in items:
+        head = arrows.get(o["direction"], o["direction"])
+        fu = f" · напомнить {o['follow_up_date']}" if o["follow_up_date"] else ""
+        lines.append(f"{head} {o['person']}: {o['title']}{fu}")
+    return "\n".join(lines)
+
+
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
@@ -337,7 +384,8 @@ class IntentRouter:
     """Резолвит intent в конкретное действие над tasks/bills и выполняет его."""
 
     def __init__(self, tasks, bills, calendar: "CalendarClient | None" = None,
-                 action_log=None, inbox=None, contacts=None, reads=None, recurring=None):
+                 action_log=None, inbox=None, contacts=None, reads=None, recurring=None,
+                 obligations=None, decisions=None):
         self.tasks = tasks
         self.bills = bills
         self.calendar = calendar  # None если календарь не настроен
@@ -346,6 +394,8 @@ class IntentRouter:
         self.contacts = contacts  # ContactStore | None — лёгкий CRM
         self.reads = reads        # ReadStore | None — read-it-later
         self.recurring = recurring  # RecurringTaskStore | None — повторяющиеся задачи
+        self.obligations = obligations  # ObligationStore | None — обязательства (§19.1)
+        self.decisions = decisions  # DecisionLogger | None — журнал решений (§19.3, исполняет хендлер)
 
     def _find_tasks(self, hint: str | None, statuses: list[str] | None = None) -> list[dict]:
         hint = (hint or "").strip().lower()
@@ -465,6 +515,21 @@ class IntentRouter:
             if self.contacts is None:
                 return Resolution("message", text="Контакты не настроены 🤔")
             return self._resolve_contact(intent, data, low)
+
+        if intent in ("create_obligation", "query_obligations",
+                      "complete_obligation", "delete_obligation"):
+            if self.obligations is None:
+                return Resolution("message", text="Обязательства не настроены 🤔")
+            return self._resolve_obligation(intent, data, low)
+
+        if intent == "inbox_reclassify":
+            return self._resolve_inbox_reclassify(data, low)
+
+        if intent in ("log_decision", "query_decisions"):
+            # Обе операции требуют LLM/память — роутер лишь гейтит их safe и
+            # отдаёт текст; реальную работу делает хендлер (как save_link/weekly).
+            text = str(data.get("text") or data.get("note") or "").strip()
+            return self._gate(intent, {"type": intent, "text": text}, "", low)
 
         if intent in ("save_link", "query_reads", "mark_read"):
             if self.reads is None:
@@ -628,6 +693,105 @@ class IntentRouter:
                 f"Не нашёл контактов по «{name}»."
         items = self.contacts.list()
         return format_contacts(items, "👤 Контакты:")
+
+    # --- Обязательства (§19.1) -----------------------------------------------
+    # create — auto-or-confirm (medium); query — read-only (safe); complete —
+    # medium по подстроке среди открытых; delete — всегда Да/Нет (dangerous).
+    # Все мутации логируются (entity_type=obligation) и отменяемы через undo_last.
+
+    _DIRECTIONS = {"waiting_on", "i_owe"}
+
+    def _resolve_obligation(self, intent: str, data: dict, low: bool) -> Resolution:
+        assert self.obligations is not None  # resolve() гарантирует стор до вызова
+
+        if intent == "create_obligation":
+            title = str(data.get("title") or "").strip()
+            person = str(data.get("person") or "").strip()
+            if not title or not person:
+                return Resolution("chat")  # некого/нечего ждать — обычный разговор
+            direction = str(data.get("direction") or "").strip().lower()
+            if direction not in self._DIRECTIONS:
+                direction = "waiting_on"
+            params = {"title": title, "person": person, "direction": direction}
+            for key in ("since_date", "follow_up_date", "related_project"):
+                if data.get(key):
+                    params[key] = data[key]
+            verb = "жду от" if direction == "waiting_on" else "должен"
+            return self._gate(
+                intent, {"type": "create_obligation", "params": params},
+                f"записать: {verb} {person} — «{title}»?", low,
+            )
+
+        if intent == "query_obligations":
+            direction = str(data.get("direction") or "").strip().lower() or None
+            if direction not in self._DIRECTIONS:
+                direction = None
+            return self._gate(intent, {"type": "query_obligations", "direction": direction,
+                                       "person": data.get("person")}, "", low)
+
+        # complete/delete — поиск по title_hint среди открытых обязательств
+        hint = data.get("title_hint") or data.get("title")
+        matches = self.obligations.find(hint, status="open")
+        if not matches:
+            return Resolution("message", text=f"Не нашёл открытое обязательство похожее на «{(hint or '').strip()}».")
+        if len(matches) > 1:
+            titles = ", ".join(f"«{o['title']}»" for o in matches[:5])
+            return Resolution("message", text=f"Нашёл несколько обязательств: {titles}. Уточни, какое именно.")
+        o = matches[0]
+        if intent == "complete_obligation":
+            return self._gate(
+                intent, {"type": "complete_obligation", "obligation_id": o["id"], "title": o["title"]},
+                f"закрыть обязательство «{o['title']}»?", low,
+            )
+        return self._gate(  # delete_obligation — dangerous: всегда Да/Нет
+            intent, {"type": "delete_obligation", "obligation_id": o["id"], "title": o["title"]},
+            f"удалить обязательство «{o['title']}»?", low,
+        )
+
+    def _apply_obligation(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
+        """Действия над обязательствами. Сюда не попадаем без настроенного стора."""
+        assert self.obligations is not None
+        kind = action["type"]
+        if kind == "create_obligation":
+            o = self.obligations.create(**action["params"])
+            verb = "Жду от" if o["direction"] == "waiting_on" else "Должен"
+            return f"📌 {verb} {o['person']}: «{o['title']}»", str(o["id"]), o, True
+        if kind == "complete_obligation":
+            after = self.obligations.update(action["obligation_id"], status="done")
+            return f"✅ Закрыл обязательство: «{action['title']}»", str(action["obligation_id"]), after, True
+        if kind == "restore_obligation":  # реверс undo: вернуть прежние поля
+            after = self.obligations.update(action["obligation_id"], **action["fields"])
+            return f"↩️ Вернул обязательство «{action['title']}»", str(action["obligation_id"]), after, True
+        if kind == "delete_obligation":
+            self.obligations.delete(action["obligation_id"])
+            return f"🗑 Удалил обязательство: «{action['title']}»", str(action["obligation_id"]), None, True
+        # query_obligations — read-only
+        items = self.obligations.list(direction=action.get("direction"),
+                                      person=action.get("person"), status="open")
+        return format_obligations(items, "📌 Открытые обязательства:"), None, None, False
+
+    # --- Переклассификация инбокса (inbox_reclassify, §19.2) -----------------
+    # Тем же приёмом, что edit_last/snooze: берём latest_active() из журнала; если
+    # это запись инбокса — меняем её статус разбора через обычный update-путь
+    # (логируется как update, отменяемо через undo_last). Risk medium (как edit).
+
+    def _resolve_inbox_reclassify(self, data: dict, low: bool) -> Resolution:
+        if self.log is None:
+            return Resolution("message", text="Журнал действий не ведётся — нечего переразбирать.")
+        if self.inbox is None:
+            return Resolution("message", text="Инбокс не настроен 🤔")
+        rec = self.log.latest_active()
+        if rec is None or rec["entity_type"] != "inbox":
+            return Resolution("message", text="Последнее действие — не запись инбокса 🤔")
+        status = str(data.get("status") or "").strip().lower()
+        if status not in INBOX_REVIEW_STATUSES:
+            return Resolution("message", text="Не понял, куда отложить (когда-нибудь / нужно решить / может быть потом) 🤔")
+        label = INBOX_REVIEW_STATUSES[status]
+        return self._gate(
+            "inbox_reclassify",
+            {"type": "reclassify_inbox", "item_id": int(rec["entity_id"]), "status": status},
+            f"отложить запись инбокса в «{label}»?", low,
+        )
 
     # --- Read-it-later (§15) -------------------------------------------------
     # save_link — всегда execute (хендлер обогатит params саммари до вызова
@@ -851,6 +1015,30 @@ class IntentRouter:
                 params = {k: before[k] for k in ("name", "last_contact_date", "birthday", "notes")
                           if before.get(k) is not None}
                 return {"type": "create_contact", "params": params}
+
+        if et == "obligation":
+            if act == "create":  # создали → удаляем
+                return {"type": "delete_obligation", "obligation_id": int(eid),
+                        "title": (after or {}).get("title", "")}
+            if act == "update" and before is not None:  # закрыли/изменили → восстановить before
+                fields = {k: before.get(k) for k in
+                          ("title", "person", "direction", "since_date",
+                           "follow_up_date", "status", "related_project")}
+                return {"type": "restore_obligation", "obligation_id": int(eid),
+                        "fields": fields, "title": before.get("title", "")}
+            if act == "delete" and before is not None:  # удалили → создаём заново (новый id — ок)
+                params = {k: before[k] for k in
+                          ("title", "person", "direction", "since_date",
+                           "follow_up_date", "related_project", "source")
+                          if before.get(k) is not None}
+                return {"type": "create_obligation", "params": params}
+
+        if et == "inbox":
+            if act == "create":  # захватили мысль → удаляем запись
+                return {"type": "delete_inbox", "item_id": int(eid)}
+            if act == "update" and before is not None:  # переклассифицировали → вернуть прежний статус
+                return {"type": "reclassify_inbox", "item_id": int(eid),
+                        "status": before.get("status", "pending")}
 
         if et == "read":
             if act == "create":  # сохранили ссылку → удаляем
@@ -1077,12 +1265,24 @@ class IntentRouter:
             if self.inbox is None:
                 return "Инбокс не настроен 🤔", None, None, False
             item = self.inbox.create(action["text"], source="telegram")
-            return f"📥 Записал в инбокс: «{item['text']}»", None, None, False
+            return f"📥 Записал в инбокс: «{item['text']}»", str(item["id"]), item, True
+        if kind == "reclassify_inbox":  # inbox_reclassify / реверс undo — смена статуса разбора
+            assert self.inbox is not None
+            after = self.inbox.set_status(action["item_id"], action["status"])
+            label = INBOX_REVIEW_STATUSES.get(action["status"], action["status"])
+            return f"🗂 Отложил в «{label}»", str(action["item_id"]), after, True
+        if kind == "delete_inbox":  # реверс undo capture
+            assert self.inbox is not None
+            self.inbox.delete(action["item_id"])
+            return "↩️ Убрал запись из инбокса", str(action["item_id"]), None, True
         if kind in ("create_contact", "update_contact", "edit_contact", "restore_contact",
                     "delete_contact", "query_contacts"):
             return self._apply_contact(action)
         if kind in ("save_link", "mark_read", "restore_read", "delete_read", "query_reads"):
             return self._apply_read(action)
+        if kind in ("create_obligation", "complete_obligation", "restore_obligation",
+                    "delete_obligation", "query_obligations"):
+            return self._apply_obligation(action)
         if kind in ("create_recurring_template", "delete_recurring_template", "query_recurring_tasks"):
             return self._apply_recurring(action)
         if kind == "mark_bill_paid":
@@ -1148,6 +1348,12 @@ class IntentRouter:
         if entity_type == "read":
             assert self.reads is not None
             return self.reads.get(action["read_id"])
+        if entity_type == "obligation":
+            assert self.obligations is not None
+            return self.obligations.get(action["obligation_id"])
+        if entity_type == "inbox":
+            assert self.inbox is not None
+            return self.inbox.get(int(action["item_id"]))
         if entity_type == "calendar_event":
             assert self.calendar is not None
             return self._event_state(self.calendar.get_event(action["event_id"]))

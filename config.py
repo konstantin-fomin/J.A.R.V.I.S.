@@ -66,6 +66,9 @@ CONTACTS_DB_PATH = Path(os.getenv("CONTACTS_DB_PATH") or (BASE_DIR / "contacts.d
 # За сколько дней до дня рождения присылать ежедневное напоминание.
 BIRTHDAY_REMINDER_LEAD_DAYS = int(os.getenv("BIRTHDAY_REMINDER_LEAD_DAYS") or 3)
 
+# Обязательства (§19.1): кто кому что должен / чего ждёшь. SQLite, отдельно.
+OBLIGATIONS_DB_PATH = Path(os.getenv("OBLIGATIONS_DB_PATH") or (BASE_DIR / "obligations.db"))
+
 # Read-it-later (§15). SQLite, отдельно от остальных. Дайджест непрочитанного —
 # раз в неделю (job reads_digest), а не ежедневно.
 READS_DB_PATH = Path(os.getenv("READS_DB_PATH") or (BASE_DIR / "reads.db"))

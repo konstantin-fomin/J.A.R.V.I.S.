@@ -25,6 +25,7 @@ class ObsidianVault:
         """Создаёт папку памяти и базовые файлы, если их нет."""
         (self.root / "journal").mkdir(parents=True, exist_ok=True)
         (self.root / "topics").mkdir(parents=True, exist_ok=True)
+        (self.root / "decisions").mkdir(parents=True, exist_ok=True)  # журнал решений (§19.3)
         about = self.root / "about_me.md"
         if not about.exists():
             about.write_text(ABOUT_ME_TEMPLATE, encoding="utf-8")
@@ -65,6 +66,16 @@ class ObsidianVault:
         with path.open("a", encoding="utf-8") as f:
             f.write(f"- {fact}\n")
         return True
+
+    def write_file(self, rel_path: str, content: str) -> str:
+        """Пишет (перезаписывает) .md-файл памяти, создавая папки при необходимости.
+
+        Используется журналом решений (§19.3): он сам формирует содержимое заметки
+        целиком, а не дописывает построчно, как facts/journal."""
+        path = self.root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return rel_path
 
     def append_journal(self, author: str, text: str) -> str:
         """Дописывает запись в журнал за сегодня. Возвращает относительный путь файла."""

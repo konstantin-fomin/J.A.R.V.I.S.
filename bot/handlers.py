@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 import config
 from bills import BillStore, current_month
+from decisions import DecisionLogger
 from intents import IntentRouter, parse_intent
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
@@ -145,6 +146,7 @@ class Handlers:
         contacts=None,
         reads=None,
         recurring=None,
+        obligations=None,
     ):
         self.memory = memory
         self.llm = llm
@@ -157,9 +159,12 @@ class Handlers:
         self.contacts = contacts      # ContactStore | None — лёгкий CRM
         self.reads = reads            # ReadStore | None — read-it-later
         self.recurring = recurring    # RecurringTaskStore | None — повторяющиеся задачи
+        self.obligations = obligations  # ObligationStore | None — обязательства (§19.1)
         self.action_log = action_log  # ActionLog | None — нужен для weekly review
+        # Журнал решений (§19.3): исполняется хендлером (нужны LLM+память), не роутером.
+        self.decisions = DecisionLogger(llm, memory)
         self.router = IntentRouter(tasks, bills, calendar, action_log, inbox, contacts, reads,
-                                   recurring)
+                                   recurring, obligations=obligations)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -265,23 +270,41 @@ class Handlers:
             # Telegram кидает «message is not modified», если правка пустая — игнорируем
             logger.debug("Не удалось обновить клавиатуру платежей", exc_info=True)
 
+    # Группировка /inbox по статусу разбора (§19.2): порядок и заголовки секций.
+    # processed сюда не входит — это «разобранные» записи, их не показываем.
+    _INBOX_GROUPS = [
+        ("pending", "📥 На разбор:"),
+        ("needs_decision", "🤔 Нужно решить:"),
+        ("someday", "💤 Когда-нибудь:"),
+        ("maybe_later", "⏳ Может быть потом:"),
+    ]
+
     async def inbox_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """/inbox: список pending-заметок, у каждой кнопка «→ в задачу»."""
+        """/inbox: активные заметки, сгруппированные по статусу разбора (§19.2),
+        у каждой кнопка «→ в задачу»."""
         if not _allowed(update):
             return
-        items = self.inbox.list(status="pending") if self.inbox else []
-        if not items:
+        items = self.inbox.list() if self.inbox else []
+        active = [it for it in items if it["status"] != "processed"]
+        if not active:
             await update.message.reply_text("Инбокс пуст 📥")
             return
-        lines = ["📥 Инбокс (на разбор):", ""]
+        lines: list[str] = []
         rows = []
-        for it in items:
-            lines.append(f"• {it['text']}")
-            label = it["text"] if len(it["text"]) <= 30 else it["text"][:29] + "…"
-            rows.append(
-                [InlineKeyboardButton(f"→ в задачу: {label}",
-                                      callback_data=f"{INBOX_TO_TASK_PREFIX}{it['id']}")]
-            )
+        for status, header in self._INBOX_GROUPS:
+            group = [it for it in active if it["status"] == status]
+            if not group:
+                continue
+            if lines:
+                lines.append("")
+            lines.append(header)
+            for it in group:
+                lines.append(f"• {it['text']}")
+                label = it["text"] if len(it["text"]) <= 30 else it["text"][:29] + "…"
+                rows.append(
+                    [InlineKeyboardButton(f"→ в задачу: {label}",
+                                          callback_data=f"{INBOX_TO_TASK_PREFIX}{it['id']}")]
+                )
         markup = InlineKeyboardMarkup(rows)
         parts = _split_message("\n".join(lines))
         for i, part in enumerate(parts):
@@ -449,6 +472,9 @@ class Handlers:
             if resolution.action["type"] == "query_weekly_review":
                 await self._weekly_review(update)
                 return
+            if resolution.action["type"] in ("log_decision", "query_decisions"):
+                await self._decision(update, resolution.action)
+                return
             reply = await asyncio.to_thread(self.router.execute, resolution.action)
             for part in _split_message(reply):
                 await update.message.reply_text(part)
@@ -474,6 +500,19 @@ class Handlers:
         info = await asyncio.to_thread(enrich_link, self.llm, url)
         action["params"].update(title=info["title"], summary=info["summary"])
         reply = await asyncio.to_thread(self.router.execute, action)
+        for part in _split_message(reply):
+            await update.message.reply_text(part)
+
+    async def _decision(self, update: Update, action: dict) -> None:
+        """Журнал решений (§19.3): извлечение+запись (log_decision) или поиск
+        (query_decisions). Обе операции трогают LLM/память — в to_thread. Router
+        лишь гейтит safe и отдаёт сюда исходный текст."""
+        await update.message.chat.send_action(ChatAction.TYPING)
+        text = action.get("text") or ""
+        if action["type"] == "log_decision":
+            reply = await asyncio.to_thread(self.decisions.log_decision, text)
+        else:
+            reply = await asyncio.to_thread(self.decisions.query_decisions, text)
         for part in _split_message(reply):
             await update.message.reply_text(part)
 

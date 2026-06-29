@@ -28,7 +28,9 @@ from bot.handlers import (
 )
 from calendar_client import events_to_remind
 from contacts import ContactStore, days_until_birthday
+from intents import format_obligations
 from llm.ollama_client import LLMClient
+from obligations import ObligationStore
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
 from reads import ReadStore
@@ -48,6 +50,9 @@ SUGGEST_REMINDER_TIME = time(hour=10, minute=0)
 
 # Время ежедневной проверки ближайших дней рождения (§14).
 BIRTHDAY_REMINDER_TIME = time(hour=9, minute=30)
+
+# Время ежедневной проверки follow-up по обязательствам (§19.1).
+OBLIGATION_FOLLOWUP_TIME = time(hour=9, minute=45)
 
 # Время еженедельного дайджеста «почитать» (§15). Сам интервал — раз в неделю.
 READS_DIGEST_TIME = time(hour=11, minute=0)
@@ -187,6 +192,23 @@ async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
+async def follow_up_obligations(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в день: если есть открытые обязательства с follow_up_date <= сегодня —
+    напомнить (§19.1). Обёрнут quiet_defer (тихие часы §18.3). Пусто — молчим."""
+    if quiet_defer(context, follow_up_obligations):
+        return
+    obligations: ObligationStore = context.job.data
+    chat_id = config.ALLOWED_USER_ID
+    if chat_id is None:
+        logger.warning("ALLOWED_USER_ID не задан — некому слать follow-up по обязательствам")
+        return
+    due = obligations.due_followups(date.today())
+    if not due:
+        return
+    text = format_obligations(due, "🔔 Напоминания по обязательствам:")
+    await context.bot.send_message(chat_id=chat_id, text=text)
+
+
 async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Раз в неделю: дайджест непрочитанных ссылок (§15). Саммари уже лежит в БД
     (посчитано при сохранении) — здесь только показываем. У каждой записи кнопка
@@ -314,6 +336,7 @@ def build_application(
     contacts=None,
     reads=None,
     recurring=None,
+    obligations=None,
 ) -> Application:
     # Проактивные подсказки (§13): лог общий для job (показ/пометка) и хендлеров
     # (кнопка «Да» достаёт формулировку темы по hash). Тема формулируется LLM.
@@ -328,7 +351,7 @@ def build_application(
         repeat_block_days=config.SUGGEST_REPEAT_BLOCK_DAYS,
     )
     handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox,
-                        suggest_log, contacts, reads, recurring)
+                        suggest_log, contacts, reads, recurring, obligations)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("plan", handlers.plan))
@@ -361,6 +384,12 @@ def build_application(
             app.job_queue.run_daily(
                 birthday_reminder, time=BIRTHDAY_REMINDER_TIME, data=contacts,
                 name="birthday_reminder",
+            )
+        # Ежедневный follow-up по обязательствам — если стор настроен (§19.1)
+        if obligations is not None:
+            app.job_queue.run_daily(
+                follow_up_obligations, time=OBLIGATION_FOLLOWUP_TIME, data=obligations,
+                name="follow_up_obligations",
             )
         # Еженедельный дайджест «почитать» — если read-it-later настроен
         if reads is not None:
@@ -422,10 +451,11 @@ def run_bot(
     contacts=None,
     reads=None,
     recurring=None,
+    obligations=None,
 ) -> None:
     """Запускает бота в режиме polling (блокирующий вызов, главный поток)."""
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts, reads, recurring).run_polling(
+                      inbox, contacts, reads, recurring, obligations).run_polling(
         drop_pending_updates=True
     )
 
@@ -443,12 +473,13 @@ def run_bot_in_thread(
     contacts=None,
     reads=None,
     recurring=None,
+    obligations=None,
 ) -> None:
     """Polling в отдельном потоке: свой event loop, без обработчиков сигналов
     (их можно ставить только в главном потоке)."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     build_application(token, memory, llm, facts, bills, tasks, calendar, action_log,
-                      inbox, contacts, reads, recurring).run_polling(
+                      inbox, contacts, reads, recurring, obligations).run_polling(
         drop_pending_updates=True, stop_signals=None
     )

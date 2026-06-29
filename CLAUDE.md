@@ -30,15 +30,19 @@ intents.py     свободный текст → JSON-намерение → Int
 tasks.py       TaskStore (tasks.db); bills.py BillStore (bills.db); inbox.py InboxStore (inbox.db)
 recurring.py   RecurringTaskStore (recurring.db) — повторяющиеся задачи (§18.2), отдельно от Bills
 contacts.py    ContactStore (contacts.db) — лёгкий CRM (§14)
+obligations.py ObligationStore (obligations.db) — обязательства waiting_on/i_owe (§19.1)
+decisions.py   DecisionLogger — журнал решений в decisions/ Obsidian-vault (§19.3), исполняет Handlers
 suggestions.py проактивные подсказки из заметок (§13): кластеризация journal-тем
 logger.py      ActionLog (actions.db) — журнал мутаций + undo_last (§10)
 scheduler_utils.py  тихие часы (§18.3): is_quiet_now + quiet_defer (отложить job до конца окна)
 calendar_client.py  Google Calendar (опц., token.json); voice.py — голос → Gemini-транскрипция
 ```
 
-Все мутации (tasks/bills/calendar/contacts) проходят через `IntentRouter.execute`,
-логируются в `ActionLog` и отменяемы через `undo_last` (`edit_last` правит одно поле
-последнего действия — тоже как обычный update, отменяем). Выполнить сразу или
+Все мутации (tasks/bills/calendar/contacts/obligations/inbox) проходят через
+`IntentRouter.execute`, логируются в `ActionLog` и отменяемы через `undo_last`
+(`edit_last` правит одно поле последнего действия — тоже как обычный update,
+отменяем; `inbox_reclassify` (§19.2) тем же путём меняет статус разбора последней
+записи инбокса; `capture` теперь журналируется и отменяем). Выполнить сразу или
 переспросить — решает декларативная таблица `RISK_LEVELS` (safe/medium/dangerous) в
 начале `intents.py` через единый шлюз `_gate`, а не разрозненные `if` (§17). `snooze`
 (§18.1) — отложить последнюю задачу: переиспользует `edit_last`-путь, нормализуя

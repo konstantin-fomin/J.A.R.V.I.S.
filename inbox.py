@@ -3,6 +3,11 @@
 Простая обёртка без ORM — как tasks.py/bills.py. Таблица создаётся автоматически
 при первом обращении. Запись живёт в статусе 'pending', пока её не превратят в
 задачу (кнопка «→ в задачу» в /inbox) — тогда статус становится 'processed'.
+
+Очереди разбора (§19.2): сверх pending/processed запись можно переклассифицировать
+в 'someday' / 'needs_decision' / 'maybe_later' (intent inbox_reclassify). Статус —
+свободный TEXT, так что схема не меняется; меняется лишь набор значений и
+группировка в /inbox. capture журналируется и отменяем (отсюда delete).
 """
 import datetime
 import sqlite3
@@ -72,3 +77,9 @@ class InboxStore:
                 "UPDATE inbox_items SET status = ? WHERE id = ?", (status, item_id)
             )
         return self.get(item_id)
+
+    def delete(self, item_id: int) -> bool:
+        """Удаляет запись инбокса (нужно для отмены capture через undo_last, §19.2)."""
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM inbox_items WHERE id = ?", (item_id,))
+        return cur.rowcount > 0

@@ -20,6 +20,7 @@ from memory.manager import MemoryManager
 from bills import BillStore
 from contacts import ContactStore
 from inbox import InboxStore
+from obligations import ObligationStore
 from logger import ActionLog
 from reads import ReadStore
 from recurring import RecurringTaskStore
@@ -79,6 +80,7 @@ def main() -> None:
     contacts_store = ContactStore(config.CONTACTS_DB_PATH)
     reads_store = ReadStore(config.READS_DB_PATH)
     recurring_store = RecurringTaskStore(config.RECURRING_DB_PATH)
+    obligations_store = ObligationStore(config.OBLIGATIONS_DB_PATH)
     # Календарь опционален: None, если нет credentials.json/token.json
     calendar = load_calendar()
     logger.info("Google Calendar: %s", "подключён" if calendar else "не настроен (token.json нет)")
@@ -92,7 +94,7 @@ def main() -> None:
     )
     bot_thread = threading.Thread(
         target=run_bot_in_thread,
-        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store, calendar, action_log, inbox_store, contacts_store, reads_store, recurring_store),
+        args=(config.TELEGRAM_BOT_TOKEN, memory, llm, facts, bills_store, tasks_store, calendar, action_log, inbox_store, contacts_store, reads_store, recurring_store, obligations_store),
         daemon=True,
         name="telegram-polling",
     )

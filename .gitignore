@@ -30,6 +30,9 @@ reads.db-wal
 recurring.db
 recurring.db-journal
 recurring.db-wal
+obligations.db
+obligations.db-journal
+obligations.db-wal
 K:/OBSIDIAN/
 
 # Python
