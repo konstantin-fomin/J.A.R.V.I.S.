@@ -20,6 +20,7 @@ from suggestions import (
     journal_date,
     propose_label,
     theme_hash,
+    user_authored_text,
 )
 from tasks import TaskStore
 
@@ -32,6 +33,11 @@ def chunk(text, file, embedding):
 
 def jfile(d: date) -> str:
     return f"journal/{d:%Y-%m-%d}.md"
+
+
+def jchunk(author, body, d, embedding):
+    """Чанк с одной журнальной записью в реальном формате `- **HH:MM** [автор] …`."""
+    return chunk(f"- **10:00** [{author}] {body}", jfile(d), embedding)
 
 
 class FakeIndex:
@@ -197,6 +203,72 @@ def test_topic_files_ignored(tmp_path):
         chunk("x", "topics/work.md", [0.93, 0.07, 0.0]),  # без даты
     ])
     assert suggester(index, log).find_suggestions(today=TODAY) == []
+
+
+# --- user_authored_text: источник подсказок — только записи пользователя -------
+
+def test_user_authored_text_drops_bot_lines():
+    text = ("- **10:00** [я] купить молоко\n"
+            "- **10:01** [бот] ок, записал\n"
+            "- **11:00** [дневник] устал сегодня")
+    out = user_authored_text(text)
+    assert "купить молоко" in out
+    assert "устал сегодня" in out          # дневник — тоже голос пользователя
+    assert "записал" not in out            # реплика бота вырезана
+
+
+def test_user_authored_text_keeps_continuation_lines():
+    # многострочная запись: продолжение наследует автора своей записи
+    text = ("- **10:00** [я] первая строка\n"
+            "  вторая строка\n"
+            "- **10:01** [бот] ответ\n"
+            "  продолжение ответа")
+    out = user_authored_text(text)
+    assert "вторая строка" in out
+    assert "продолжение ответа" not in out
+
+
+def test_user_authored_text_empty_when_all_bot():
+    assert user_authored_text("- **10:00** [бот] только бот") == ""
+
+
+def test_user_authored_text_passthrough_without_markers():
+    # текст без журнальных записей (упрощённый/старый формат) не режем
+    assert user_authored_text("просто текст") == "просто текст"
+
+
+# --- find_suggestions: бот-записи не питают подсказки -------------------------
+
+def test_bot_only_chunk_excluded_from_clustering(tmp_path):
+    log = SuggestionLog(tmp_path / "s.db")
+    index = FakeIndex([
+        jchunk("я", "ремонт ванной", date(2026, 6, 20), [1.0, 0.0, 0.0]),
+        jchunk("я", "плитка для ванной", date(2026, 6, 24), [0.95, 0.05, 0.0]),
+        jchunk("бот", "записал про ремонт", date(2026, 6, 27), [0.9, 0.1, 0.0]),
+    ])
+    # бот-чанк — не источник: остаётся только 2 пользовательских → кластера нет
+    assert suggester(index, log).find_suggestions(today=TODAY) == []
+
+
+def test_label_built_from_user_text_only(tmp_path):
+    log = SuggestionLog(tmp_path / "s.db")
+    mixed = ("- **10:00** [я] обсудили ремонт\n"
+             "- **10:01** [бот] СЕКРЕТ-БОТА записал")
+    index = FakeIndex([
+        chunk(mixed, jfile(date(2026, 6, 20)), [1.0, 0.0, 0.0]),
+        jchunk("я", "ещё про ремонт", date(2026, 6, 24), [0.95, 0.05, 0.0]),
+        jchunk("я", "ремонт продолжается", date(2026, 6, 27), [0.9, 0.1, 0.0]),
+    ])
+    seen: list[str] = []
+    sug = ProactiveSuggester(
+        index, label_fn=lambda ts: (seen.extend(ts), "ремонт")[1], log=log,
+        window_days=14, max_distance=0.35, min_cluster=3, repeat_block_days=7,
+    )
+    out = sug.find_suggestions(today=TODAY)
+    assert len(out) == 1
+    joined = "\n".join(seen)
+    assert "обсудили ремонт" in joined
+    assert "СЕКРЕТ-БОТА" not in joined      # реплика бота не попала в источник
 
 
 # --- SuggestionLog.label_for: восстановление темы после рестарта --------------

@@ -26,6 +26,40 @@ from typing import Callable, Optional
 # (без даты в имени) в окно не попадают.
 _JOURNAL_RE = re.compile(r"journal/(\d{4}-\d{2}-\d{2})\.md$")
 
+# Строка журнальной записи: `- **ЧЧ:ММ** [автор] текст` (см. obsidian.append_journal).
+# Автор захватываем, чтобы отличить голос пользователя от реплик бота.
+_ENTRY_RE = re.compile(r"^- \*\*\d{1,2}:\d{2}\*\* \[([^\]]+)\]")
+
+# Автор, под которым логируются ответы ассистента (handlers/web). Всё остальное
+# («я» из чата, «дневник» из команды) — голос пользователя.
+_BOT_AUTHOR = "бот"
+
+
+def user_authored_text(text: str) -> str:
+    """Оставляет в journal-чанке только записи, написанные пользователем.
+
+    Реплики бота (`[бот]`) — не источник для проактивных подсказок: иначе бот
+    предлагает задачи по собственным же ответам (эхо-петля, §13). Строки-
+    продолжения многострочной записи наследуют автора своей записи.
+
+    Если в тексте нет ни одной распознанной записи (упрощённый/старый формат без
+    `[автор]`-меток), вернуть его как есть — авторство не определить, резать
+    нечего."""
+    lines = text.splitlines()
+    if not any(_ENTRY_RE.match(ln) for ln in lines):
+        return text.strip()
+    out: list[str] = []
+    keep = False
+    for ln in lines:
+        m = _ENTRY_RE.match(ln)
+        if m is not None:
+            keep = m.group(1).strip() != _BOT_AUTHOR
+        elif not ln.strip():
+            keep = False  # пустые строки/заголовки не относятся к записи
+        if keep:
+            out.append(ln)
+    return "\n".join(out).strip()
+
 
 def cosine_distance(a: list[float], b: list[float]) -> float:
     """Косинусная дистанция (1 - сходство): 0 — идентичны, 1 — ортогональны.
@@ -202,8 +236,16 @@ class ProactiveSuggester:
         in_window: list[dict] = []
         for c in self.index.journal_chunks():
             d = journal_date(c["file"])
-            if d is not None and cutoff <= d <= today:
-                in_window.append(c)
+            if d is None or not (cutoff <= d <= today):
+                continue
+            # Источник подсказок — только голос пользователя: реплики бота
+            # вырезаем, а чанки целиком от бота не считаем записью (§13). Эмбеддинг
+            # остаётся исходным (переэмбеддить оффлайн нечем) — фильтр влияет на
+            # счёт кластера и на текст, по которому label_fn формулирует тему.
+            user_text = user_authored_text(c["text"])
+            if not user_text:
+                continue
+            in_window.append({**c, "text": user_text})
 
         out: list[dict] = []
         for cluster in cluster_chunks(in_window, self.max_distance, self.min_cluster):
