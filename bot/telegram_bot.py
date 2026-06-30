@@ -452,6 +452,7 @@ def build_application(
     app.add_handler(CallbackQueryHandler(handlers.read_done, pattern=f"^{READS_DONE_PREFIX}"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handlers.handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handlers.handle_photo))
 
     # Ежедневная проверка платежей на завтра. JobQueue требует extra
     # python-telegram-bot[job-queue] (APScheduler) — без него job_queue=None.

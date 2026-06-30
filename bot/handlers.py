@@ -17,6 +17,7 @@ from memory.manager import MemoryManager
 from reads import enrich_link
 from tasks import TaskStore
 from voice import VoiceError, transcribe_voice
+from vision import VisionError, describe_photo
 from weekly_review import compose_summary, compute_week_stats, format_review
 
 logger = logging.getLogger(__name__)
@@ -437,6 +438,46 @@ class Handlers:
             return
 
         await self._process_text(update, context, text)
+
+    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Фото: скачать JPEG → Gemini (с подписью, если есть) → ответ текстом (§5-bis).
+
+        Минимальный путь: мультимодальный ответ уходит как обычное текстовое
+        сообщение. Пока без inbox-записи и привязки файлов — это отдельный шаг."""
+        if not _allowed(update):
+            return
+        photo = update.message.photo
+        if not photo:
+            return
+        caption = update.message.caption  # подпись к фото или None
+
+        await update.message.chat.send_action(ChatAction.TYPING)
+        try:
+            # photo — список размеров по возрастанию; берём самый крупный.
+            tg_file = await context.bot.get_file(photo[-1].file_id)
+            image_bytes = bytes(await tg_file.download_as_bytearray())
+            answer = await asyncio.to_thread(describe_photo, image_bytes, caption)
+        except VisionError:
+            logger.exception("Не удалось обработать фото")
+            await update.message.reply_text(
+                "Не смог разобрать фото 😔 Попробуй ещё раз или опиши текстом."
+            )
+            return
+        except Exception:
+            logger.exception("Сбой при скачивании/обработке фото")
+            await update.message.reply_text(
+                "Что-то пошло не так с фото 😔 Напиши, пожалуйста, текстом."
+            )
+            return
+
+        if not answer:
+            await update.message.reply_text(
+                "Не понял, что на фото 🖼 Попробуй другое фото или опиши текстом."
+            )
+            return
+
+        for part in _split_message(answer):
+            await update.message.reply_text(part)
 
     async def _process_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         """Общий путь для текста и расшифрованного голоса: намерение → действие/чат."""
