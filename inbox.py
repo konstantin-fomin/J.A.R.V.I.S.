@@ -15,6 +15,18 @@ from pathlib import Path
 from typing import Optional
 
 
+def convert_inbox_item_to_task(tasks, inbox: "InboxStore", item: dict) -> dict:
+    """Общая операция «inbox-запись → задача» для обоих входов (REST-эндпоинт и
+    NL-intent inbox_to_task): создаёт задачу с ДОСЛОВНЫМ текстом записи (без LLM —
+    быстро и предсказуемо) и помечает запись processed. Возвращает созданную задачу.
+
+    Логирование/undo здесь НЕ делаем — это решает вызывающий: REST идёт мимо
+    ActionLog (как PATCH /api/tasks, §10), а NL-путь оборачивается IntentRouter."""
+    task = tasks.create(title=item["text"], source="inbox")
+    inbox.set_status(item["id"], "processed")
+    return task
+
+
 class InboxStore:
     def __init__(self, db_path: Path):
         self._db_path = db_path

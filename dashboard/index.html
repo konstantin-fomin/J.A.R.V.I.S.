@@ -77,6 +77,14 @@
   .weather-temp{ font-family:var(--mono); font-size:40px; font-weight:600; line-height:1; display:flex; align-items:center; gap:10px; justify-content:flex-end; }
   .weather-temp svg{ width:34px;height:34px;color:var(--accent); }
   .weather-desc{ font-size:14px; color:var(--text-dim); margin-top:6px; }
+  .weather-edit-toggle{ background:none; border:none; color:var(--accent); font-family:var(--sans); font-size:11.5px; font-weight:600; cursor:pointer; padding:6px 0 0; margin-left:auto; display:block; opacity:.85; }
+  .weather-edit-toggle:hover{ opacity:1; text-decoration:underline; }
+  .city-edit-row{ display:flex; gap:8px; margin-top:9px; justify-content:flex-end; }
+  .city-edit-row.hidden{ display:none; }
+  .text-input{ background:var(--bg); border:1px solid var(--line); color:var(--text); font-family:var(--sans); font-size:13.5px; padding:8px 10px; border-radius:9px; width:140px; }
+  .text-input::placeholder{ color:var(--text-faint); }
+  .mini-btn{ background:var(--accent-soft); border:1px solid var(--accent-line); color:var(--accent); font-size:13px; font-weight:600; padding:0 12px; border-radius:9px; cursor:pointer; white-space:nowrap; }
+  .mini-btn:hover{ background:var(--accent-line); }
 
   .now-strip{ font-size:16px; line-height:1.6; }
   .now-strip b{ color:var(--accent); font-weight:700; }
@@ -93,7 +101,7 @@
   .check svg{ display:none; width:12px;height:12px;color:var(--bg); }
   .check.on svg{ display:block; }
   .project-tag{ font-family:var(--mono); font-size:10.5px; color:var(--accent); background:var(--accent-soft); padding:3px 8px; border-radius:6px; flex-shrink:0; }
-  .meeting-time{ font-family:var(--mono); font-size:14.5px; color:var(--text-dim); flex-shrink:0; width:48px; }
+  .meeting-time{ font-family:var(--mono); font-size:14.5px; color:var(--text-dim); flex-shrink:0; width:100px; }
   .list-item.next-meeting .meeting-time{ color:var(--accent); }
   .bill-amount{ font-family:var(--mono); font-size:14px; color:var(--text-dim); flex-shrink:0; }
   .bill-due{ font-family:var(--mono); font-size:12px; color:var(--text-faint); flex-shrink:0; width:38px; }
@@ -105,8 +113,13 @@
   .metric-icon{ width:24px;height:24px;color:var(--text-faint); }
   .metric.hot .metric-icon{ color:var(--accent); }
   .metric-value{ font-family:var(--mono); font-size:30px; font-weight:600; line-height:1; }
+  .metric-preview{ font-family:var(--sans); font-size:14.5px; font-weight:600; line-height:1.3; color:var(--text); word-break:break-word; }
   .metric-label{ font-size:13px; color:var(--text-dim); margin-top:4px; }
   .metric-sub{ font-family:var(--mono); font-size:12px; color:var(--accent); margin-top:2px; min-height:14px; }
+
+  .next-tasks-block{ margin-top:14px; }
+  .next-tasks-divider{ font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:1.4px; color:var(--text-faint); text-transform:uppercase; margin-bottom:9px; padding-top:12px; border-top:1px solid var(--line-soft); }
+  .next-task-date{ font-family:var(--mono); font-size:12px; color:var(--text-faint); flex-shrink:0; width:36px; }
 
   .capture-input{ width:100%; background:var(--bg); border:1px solid var(--line); color:var(--text); font-family:var(--sans); font-size:15px; padding:13px 15px; border-radius:12px; }
   .capture-input::placeholder{ color:var(--text-faint); }
@@ -115,6 +128,30 @@
   .footer{ grid-column:span 2; text-align:center; font-family:var(--mono); font-size:11px; color:var(--text-faint); display:flex; align-items:center; justify-content:center; gap:8px; padding:4px 0 2px; }
   .dot{ width:7px;height:7px;border-radius:50%;background:var(--good); }
   .dot.stale{ background:var(--danger); }
+
+  .tile.clickable{ cursor:pointer; }
+  .tile.clickable:hover{ border-color:var(--line); }
+
+  .bills-nav{ display:flex; align-items:center; gap:8px; }
+  .month-nav{ background:none; border:none; color:var(--text-faint); font-size:17px; cursor:pointer; padding:0 2px; line-height:1; }
+  .month-nav:hover{ color:var(--accent); }
+
+  .modal-overlay{ position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; z-index:50; padding:24px; }
+  .modal-overlay.hidden{ display:none; }
+  .modal-box{ background:var(--tile-hi); border:1px solid var(--line); border-radius:18px; padding:22px 24px; max-width:480px; width:100%; max-height:80vh; overflow-y:auto; }
+  .modal-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+  .modal-title{ font-family:var(--mono); font-size:13px; font-weight:600; letter-spacing:1px; text-transform:uppercase; color:var(--text-dim); }
+  .modal-close{ background:none; border:none; color:var(--text-faint); font-size:22px; cursor:pointer; line-height:1; padding:0 4px; }
+  .modal-close:hover{ color:var(--text); }
+  .modal-group-label{ font-family:var(--mono); font-size:11px; color:var(--text-faint); letter-spacing:1px; text-transform:uppercase; margin:16px 0 8px; }
+  .modal-group-label:first-child{ margin-top:0; }
+  .modal-item{ display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid var(--line-soft); font-size:14.5px; }
+  .modal-item:last-child{ border-bottom:none; }
+  .modal-item-date{ font-family:var(--mono); font-size:11.5px; color:var(--text-faint); flex-shrink:0; white-space:nowrap; }
+  .modal-item-meta{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+  .modal-item-act{ background:var(--accent-soft); border:1px solid var(--accent-line); color:var(--accent); font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:7px; cursor:pointer; white-space:nowrap; }
+  .modal-item-act:hover{ background:var(--accent-line); }
+  .modal-item-act:disabled{ opacity:.5; cursor:default; }
 </style>
 </head>
 <body>
@@ -125,7 +162,14 @@
       <div class="clock"><span id="clock-time">--:--</span><span class="clock-sec" id="clock-sec">:--</span></div>
       <div class="date" id="clock-date">—</div>
     </div>
-    <div class="weather-box" id="weather-box"><span class="skeleton">погода…</span></div>
+    <div class="weather-box">
+      <div id="weather-box"><span class="skeleton">погода…</span></div>
+      <button class="weather-edit-toggle" id="city-edit-toggle" type="button">изменить город</button>
+      <div class="city-edit-row hidden" id="city-edit-row">
+        <input type="text" id="city-input" class="text-input" placeholder="Город" />
+        <button class="mini-btn" id="city-confirm-btn" type="button">OK</button>
+      </div>
+    </div>
   </div>
 
   <div class="tile col-2" id="now-tile">
@@ -136,6 +180,7 @@
   <div class="tile row-tall">
     <div class="eyebrow-row"><span class="eyebrow">Задачи</span><span class="count-badge" id="tasks-count"></span></div>
     <ul class="list" id="tasks-list"><li class="skeleton">загрузка…</li></ul>
+    <div class="next-tasks-block" id="next-tasks-block"></div>
   </div>
 
   <div class="tile row-tall">
@@ -144,13 +189,20 @@
   </div>
 
   <div class="tile col-2">
-    <div class="eyebrow-row"><span class="eyebrow">Платежи месяца</span><span class="count-badge" id="bills-count"></span></div>
+    <div class="eyebrow-row">
+      <div class="bills-nav">
+        <button class="month-nav" id="bills-prev" type="button" aria-label="Предыдущий месяц">‹</button>
+        <span class="eyebrow" id="bills-eyebrow">Платежи месяца</span>
+        <button class="month-nav" id="bills-next" type="button" aria-label="Следующий месяц">›</button>
+      </div>
+      <span class="count-badge" id="bills-count"></span>
+    </div>
     <ul class="list" id="bills-list"><li class="skeleton">загрузка…</li></ul>
   </div>
 
-  <div class="tile metric" id="inbox-tile">
+  <div class="tile metric clickable" id="inbox-tile" role="button" tabindex="0" aria-label="Открыть инбокс">
     <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h4l2 3h4l2-3h4"/><path d="M4 13V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></svg>
-    <div><div class="metric-value" id="inbox-value">·</div><div class="metric-label">в инбоксе</div></div>
+    <div><div class="metric-preview" id="inbox-value">·</div><div class="metric-label">в инбоксе</div></div>
   </div>
   <div class="tile metric" id="bday-tile">
     <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21h16M4 21v-7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7M8 12V9M12 12V9M16 12V9M12 6V4M8 7V5.5M16 7V5.5"/></svg>
@@ -159,7 +211,7 @@
 
   <div class="tile metric" id="reads-tile">
     <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2zM4 19V5"/></svg>
-    <div><div class="metric-value" id="reads-value">·</div><div class="metric-label">почитать</div></div>
+    <div><div class="metric-preview" id="reads-value">·</div><div class="metric-label">почитать</div></div>
   </div>
   <div class="tile">
     <div class="eyebrow-row"><span class="eyebrow">Захват</span></div>
@@ -168,6 +220,16 @@
   </div>
 
   <div class="footer"><span class="dot" id="health-dot"></span><span id="health-text">подключение…</span></div>
+</div>
+
+<div class="modal-overlay hidden" id="inbox-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">Инбокс</span>
+      <button class="modal-close" id="inbox-modal-close" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <div id="inbox-modal-body"><span class="skeleton">загрузка…</span></div>
+  </div>
 </div>
 
 <script>
@@ -182,6 +244,24 @@
   function hm(d){ return pad(d.getHours())+":"+pad(d.getMinutes()); }
   function todayStr(){ var d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
   function curMonth(){ var d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1); }
+  function nextMonth(){ var d=new Date(); d.setMonth(d.getMonth()+1); return { ym: d.getFullYear()+"-"+pad(d.getMonth()+1), monthIndex: d.getMonth() }; }
+  var MONTHS_NOM=["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+
+  function shortDateTime(iso){
+    if(!iso) return "";
+    var d=parseUTC(iso); if(!d) return "";
+    var today=new Date();
+    var sameDay=d.getFullYear()===today.getFullYear() && d.getMonth()===today.getMonth() && d.getDate()===today.getDate();
+    if(sameDay) return hm(d);
+    return pad(d.getDate())+"."+pad(d.getMonth()+1);
+  }
+
+  function loadCity(){
+    try{ var raw=localStorage.getItem("jarvis_city"); if(raw) return JSON.parse(raw); }catch(e){}
+    return { name:"Франкфурт", lat:50.11, lon:8.68 };
+  }
+  function saveCity(c){ try{ localStorage.setItem("jarvis_city", JSON.stringify(c)); }catch(e){} }
+  var CITY = loadCity();
 
   function tickClock(){
     var n=new Date();
@@ -219,14 +299,114 @@
   };
   async function loadWeather(){
     try{
-      var d=await(await fetch("https://api.open-meteo.com/v1/forecast?latitude=50.11&longitude=8.68&current=temperature_2m,weather_code&timezone=auto")).json();
+      var d=await(await fetch("https://api.open-meteo.com/v1/forecast?latitude="+CITY.lat+"&longitude="+CITY.lon+"&current=temperature_2m,weather_code&timezone=auto")).json();
       var i=WCODE[d.current.weather_code]||["—","cloud"];
-      document.getElementById("weather-box").innerHTML='<div class="weather-temp">'+WICON[i[1]]+Math.round(d.current.temperature_2m)+'°</div><div class="weather-desc">'+i[0]+', Франкфурт</div>';
+      document.getElementById("weather-box").innerHTML='<div class="weather-temp">'+WICON[i[1]]+Math.round(d.current.temperature_2m)+'°</div><div class="weather-desc">'+i[0]+', '+escapeHtml(CITY.name)+'</div>';
     }catch(e){ document.getElementById("weather-box").innerHTML='<span class="skeleton">—</span>'; }
   }
 
+  async function geocodeCity(name){
+    var r=await fetch("https://geocoding-api.open-meteo.com/v1/search?name="+encodeURIComponent(name)+"&count=1&language=ru&format=json");
+    var d=await r.json();
+    if(!d.results||!d.results.length) return null;
+    var x=d.results[0];
+    return { name:x.name, lat:x.latitude, lon:x.longitude };
+  }
+
+  (function initCityEditor(){
+    var toggle=document.getElementById("city-edit-toggle");
+    var row=document.getElementById("city-edit-row");
+    var input=document.getElementById("city-input");
+    var btn=document.getElementById("city-confirm-btn");
+    toggle.addEventListener("click",function(){
+      row.classList.toggle("hidden");
+      input.value=CITY.name; input.focus();
+    });
+    async function submit(){
+      var name=input.value.trim(); if(!name) return;
+      btn.textContent="…";
+      var found=await geocodeCity(name).catch(function(){return null;});
+      btn.textContent="OK";
+      if(!found){ input.placeholder="не найден, ещё раз"; return; }
+      CITY=found; saveCity(found);
+      row.classList.add("hidden");
+      document.getElementById("weather-box").innerHTML='<span class="skeleton">погода…</span>';
+      loadWeather();
+    }
+    btn.addEventListener("click",submit);
+    input.addEventListener("keydown",function(e){ if(e.key==="Enter") submit(); });
+  })();
+
+  var INBOX_GROUPS=[
+    ["pending","Новое"],
+    ["someday","Когда-нибудь"],
+    ["needs_decision","Нужно решение"],
+    ["maybe_later","Подумать позже"]
+  ];
+
+  (function initInboxModal(){
+    var overlay=document.getElementById("inbox-modal");
+    var body=document.getElementById("inbox-modal-body");
+    var tile=document.getElementById("inbox-tile");
+    var closeBtn=document.getElementById("inbox-modal-close");
+
+    async function open(){
+      overlay.classList.remove("hidden");
+      body.innerHTML='<span class="skeleton">загрузка…</span>';
+      try{
+        var results=await Promise.all(INBOX_GROUPS.map(function(g){
+          return getJSON("/api/inbox?status="+g[0]).catch(function(){return {items:[]};});
+        }));
+        var html="";
+        results.forEach(function(res,i){
+          var items=res.items||[];
+          if(!items.length) return;
+          html+='<div class="modal-group-label">'+INBOX_GROUPS[i][1]+' · '+items.length+'</div>';
+          items.forEach(function(it){
+            // data-id безопасен (целое из стора); текст ставим во второй проход через textContent — без HTML-инъекции
+            html+='<div class="modal-item"><span class="modal-item-text"></span>'
+              +'<span class="modal-item-meta">'
+              +'<button class="modal-item-act" data-id="'+it.id+'" type="button">в задачу</button>'
+              +'<span class="modal-item-date">'+shortDateTime(it.created_at)+'</span>'
+              +'</span></div>';
+          });
+        });
+        if(!html){ body.innerHTML='<div class="empty-state">Инбокс пуст</div>'; return; }
+        body.innerHTML=html;
+        var idx=0;
+        var texts=body.querySelectorAll(".modal-item-text");
+        results.forEach(function(res){
+          (res.items||[]).forEach(function(it){
+            texts[idx].textContent=it.text;
+            idx++;
+          });
+        });
+        body.querySelectorAll(".modal-item-act").forEach(function(btn){
+          btn.addEventListener("click",async function(){
+            btn.disabled=true; btn.textContent="…";
+            try{
+              await send("/api/inbox/"+btn.dataset.id+"/to-task","POST",{});
+              await open();   // перерисовать модалку: запись стала processed и уходит из групп
+              refresh();      // обновить плитки (счётчик инбокса, список задач)
+            }catch(e){ btn.disabled=false; btn.textContent="ошибка"; }
+          });
+        });
+      }catch(e){ body.innerHTML='<div class="empty-state">Не удалось загрузить</div>'; }
+    }
+    function close(){ overlay.classList.add("hidden"); }
+
+    tile.addEventListener("click",open);
+    tile.addEventListener("keydown",function(e){ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); } });
+    closeBtn.addEventListener("click",close);
+    overlay.addEventListener("click",function(e){ if(e.target===overlay) close(); });
+    document.addEventListener("keydown",function(e){ if(e.key==="Escape") close(); });
+  })();
+
+  function formatShortDate(s){ if(!s) return ""; var p=s.split("-"); return p[2]+"."+p[1]; }
+
   async function loadTasks(){
     var list=document.getElementById("tasks-list");
+    var nextBlock=document.getElementById("next-tasks-block");
     try{
       var data=await getJSON("/api/tasks");
       var tasks=(data.tasks||[]).filter(function(t){return t.status!=="cancelled";});
@@ -235,6 +415,23 @@
       var done=tt.filter(function(t){return t.status==="done";}).length;
       snap.tasksToday=tt.length; snap.tasksDone=done;
       document.getElementById("tasks-count").textContent=tt.length?(done+"/"+tt.length):"";
+
+      var future=tasks.filter(function(t){return t.due_date && t.due_date>today && t.status!=="done";})
+        .sort(function(a,b){ var ka=a.due_date+(a.due_time||"99:99"), kb=b.due_date+(b.due_time||"99:99"); return ka<kb?-1:1; })
+        .slice(0,4);
+      if(future.length){
+        var fh='<div class="next-tasks-divider">Дальше</div><ul class="list">';
+        future.forEach(function(t){
+          fh+='<li class="list-item"><span class="next-task-date">'+formatShortDate(t.due_date)+'</span><span class="item-text"></span></li>';
+        });
+        fh+='</ul>';
+        nextBlock.innerHTML=fh;
+        var idx=0;
+        Array.prototype.forEach.call(nextBlock.querySelectorAll(".item-text"),function(el){ el.textContent=future[idx++].title; });
+      }else{
+        nextBlock.innerHTML="";
+      }
+
       if(!tt.length){ list.innerHTML='<div class="empty-state">На сегодня задач нет</div>'; renderNow(); return; }
       list.innerHTML="";
       tt.forEach(function(t){
@@ -267,9 +464,12 @@
       list.innerHTML="";
       ev.forEach(function(e){
         var s=parseUTC(e.start);
+        var en=parseUTC(e.end);
+        var timeStr=s?hm(s):"—";
+        if(en) timeStr+="–"+hm(en);
         var li=document.createElement("li");
         li.className="list-item"+(e.id===nextId?" next-meeting":"");
-        li.innerHTML='<span class="meeting-time">'+(s?hm(s):"—")+'</span><span class="item-text"></span>';
+        li.innerHTML='<span class="meeting-time">'+timeStr+'</span><span class="item-text"></span>';
         li.querySelector(".item-text").textContent=e.title;
         list.appendChild(li);
       });
@@ -277,25 +477,48 @@
     }catch(e){ list.innerHTML='<div class="empty-state">Календарь недоступен</div>'; renderNow(); }
   }
 
+  var billsOffset = 0;
+  var billsAutoForecasted = false;
+  function monthFromOffset(offset){
+    var d=new Date(); d.setMonth(d.getMonth()+offset);
+    return { ym: d.getFullYear()+"-"+pad(d.getMonth()+1), monthIndex: d.getMonth(), isCurrent: offset===0 };
+  }
+
   async function loadBills(){
     var list=document.getElementById("bills-list");
+    var eyebrow=document.getElementById("bills-eyebrow");
+    var m=monthFromOffset(billsOffset);
     try{
-      var data=await getJSON("/api/bills?month="+curMonth());
+      var data=await getJSON("/api/bills?month="+m.ym);
       var bills=data.bills||[];
+
+      if(billsOffset===0 && !billsAutoForecasted){
+        billsAutoForecasted=true;
+        var hasPending=bills.some(function(b){return b.status==="pending";});
+        if(!hasPending){
+          billsOffset=1;
+          return loadBills();
+        }
+      }
+
+      eyebrow.textContent = m.isCurrent ? "Платежи месяца" : ("Платежи — "+MONTHS_NOM[m.monthIndex]);
+
       var paid=bills.filter(function(b){return b.status==="paid";}).length;
       document.getElementById("bills-count").textContent=bills.length?(paid+"/"+bills.length):"";
       var today=todayStr();
       snap.soonBill=null; snap.soonBillOverdue=false;
-      var pend=bills.filter(function(b){return b.status==="pending";}).sort(function(a,b){return a.due_date<b.due_date?-1:1;});
-      if(pend.length){
-        var b0=pend[0];
-        var diff=Math.round((new Date(b0.due_date)-new Date(today))/86400000);
-        if(diff<=3){ snap.soonBill={name:b0.name,when:diff<0?"просрочен":(diff===0?"сегодня":"через "+diff+"д")}; snap.soonBillOverdue=diff<0; }
+      if(m.isCurrent){
+        var pend=bills.filter(function(b){return b.status==="pending";}).sort(function(a,b){return a.due_date<b.due_date?-1:1;});
+        if(pend.length){
+          var b0=pend[0];
+          var diff=Math.round((new Date(b0.due_date)-new Date(today))/86400000);
+          if(diff<=3){ snap.soonBill={name:b0.name,when:diff<0?"просрочен":(diff===0?"сегодня":"через "+diff+"д")}; snap.soonBillOverdue=diff<0; }
+        }
       }
-      if(!bills.length){ list.innerHTML='<div class="empty-state">Платежей в этом месяце нет</div>'; renderNow(); return; }
+      if(!bills.length){ list.innerHTML='<div class="empty-state">Платежей нет</div>'; renderNow(); return; }
       list.innerHTML="";
       bills.forEach(function(b){
-        var pd=b.status==="paid", ov=!pd&&b.due_date<today;
+        var pd=b.status==="paid", ov=!pd&&m.isCurrent&&b.due_date<today;
         var day=b.due_date?b.due_date.slice(8,10)+".":"";
         var li=document.createElement("li");
         li.className="list-item"+(pd?" done":"")+(ov?" overdue":"");
@@ -311,14 +534,43 @@
     }catch(e){ list.innerHTML='<div class="empty-state">Не удалось загрузить</div>'; }
   }
 
+  (function initBillsNav(){
+    document.getElementById("bills-prev").addEventListener("click",function(){
+      billsAutoForecasted=true; billsOffset--; loadBills();
+    });
+    document.getElementById("bills-next").addEventListener("click",function(){
+      billsAutoForecasted=true; billsOffset++; loadBills();
+    });
+  })();
+
+  function previewText(items, getText){
+    if(!items.length) return { text:"пусто", hot:false };
+    var first=getText(items[0])||"—";
+    var trimmed=first.length>34?first.slice(0,34)+"…":first;
+    var extra=items.length>1?(" +"+(items.length-1)):"";
+    return { text:trimmed+extra, hot:true };
+  }
+
   async function loadMetrics(){
-    try{ var ib=await getJSON("/api/inbox?status=pending"); var n=(ib.items||[]).length; document.getElementById("inbox-value").textContent=n; document.getElementById("inbox-tile").classList.toggle("hot",n>0); }catch(e){ document.getElementById("inbox-value").textContent="·"; }
+    try{
+      var ib=await getJSON("/api/inbox?status=pending");
+      var items=ib.items||[];
+      var p=previewText(items, function(it){return it.text;});
+      document.getElementById("inbox-value").textContent=p.text;
+      document.getElementById("inbox-tile").classList.toggle("hot",p.hot);
+    }catch(e){ document.getElementById("inbox-value").textContent="·"; }
     try{
       var bd=await getJSON("/api/contacts/birthdays?days=7"); var l=bd.birthdays||[];
       if(l.length){ var b=l[0]; document.getElementById("bday-value").textContent=b.in_days<=0?"!":b.in_days+"д"; document.getElementById("bday-label").textContent=escapeHtml(b.name); document.getElementById("bday-sub").textContent=b.in_days<=0?"сегодня!":"скоро"; document.getElementById("bday-tile").classList.add("hot"); }
       else{ document.getElementById("bday-value").textContent="—"; document.getElementById("bday-label").textContent="дни рождения"; document.getElementById("bday-sub").textContent=""; document.getElementById("bday-tile").classList.remove("hot"); }
     }catch(e){ document.getElementById("bday-value").textContent="—"; }
-    try{ var rd=await getJSON("/api/reads?status=unread"); var rn=(rd.reads||[]).length; document.getElementById("reads-value").textContent=rn; document.getElementById("reads-tile").classList.toggle("hot",rn>0); }catch(e){ document.getElementById("reads-value").textContent="·"; }
+    try{
+      var rd=await getJSON("/api/reads?status=unread");
+      var ritems=rd.reads||[];
+      var rp=previewText(ritems, function(it){return it.title||it.url;});
+      document.getElementById("reads-value").textContent=rp.text;
+      document.getElementById("reads-tile").classList.toggle("hot",rp.hot);
+    }catch(e){ document.getElementById("reads-value").textContent="·"; }
   }
 
   var cap=document.getElementById("capture-input"), capHint=document.getElementById("capture-hint");

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from bills import current_month
+from inbox import convert_inbox_item_to_task
 
 if TYPE_CHECKING:
     from calendar_client import CalendarClient
@@ -45,6 +46,7 @@ INTENTS = {
     "complete_obligation",
     "delete_obligation",
     "inbox_reclassify",
+    "inbox_to_task",
     "log_decision",
     "query_decisions",
     "save_link",
@@ -93,6 +95,9 @@ RISK_LEVELS = {
     "complete_obligation": "medium",
     "delete_obligation": "dangerous",
     "inbox_reclassify": "medium",
+    # inbox_to_task — safe: создание задачи + смена статуса записи, не удаление
+    # (можно сразу, без подтверждения). Логируется как обычное task/create.
+    "inbox_to_task": "safe",
     "log_decision": "safe",
     "query_decisions": "safe",
     "save_link": "safe",
@@ -153,6 +158,7 @@ _LOGGED = {
     "delete_contact": ("contact", "delete"),
     "capture": ("inbox", "create"),
     "reclassify_inbox": ("inbox", "update"),
+    "inbox_to_task": ("task", "create"),  # конвертация записи инбокса в задачу (§19.2)
     "create_obligation": ("obligation", "create"),
     "complete_obligation": ("obligation", "update"),
     "delete_obligation": ("obligation", "delete"),
@@ -239,6 +245,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - complete_obligation — закрыть обязательство («Петя прислал отчёт», «вернул долг Маше», «закрой обязательство …»). Поле: title_hint (по сути/человеку).
 - delete_obligation — удалить запись обязательства («убери обязательство …»). Поле: title_hint.
 - inbox_reclassify — переразобрать ПОСЛЕДНЮЮ запись инбокса: это не задача, а мысль на потом («это не задача, отложи подумать», «убери из задач, пусть полежит», «это на когда-нибудь»). Поле: status — куда отложить: "someday" (когда-нибудь), "needs_decision" (нужно решить), "maybe_later" (может быть потом).
+- inbox_to_task — превратить КОНКРЕТНУЮ запись инбокса в задачу («преврати в задачу …», «вот это в задачу: …», «сделай задачу из записи про …»). Поле: title_hint — нечёткое слово для поиска нужной записи инбокса по подстроке (в начальной форме). Отличие от inbox_reclassify (та откладывает последнюю запись) — здесь ищем запись по hint и создаём из неё задачу.
 - log_decision — записать ПРИНЯТОЕ решение в журнал решений («запиши решение: …», «зафиксируй: решили …», «для протокола: выбрали …»). Поле: text — исходная формулировка решения (с причиной/альтернативами, если есть).
 - query_decisions — найти прошлое решение и его обоснование («почему мы отказались от X», «какие решения по Y», «что мы решили насчёт …»). Поле: text — суть вопроса.
 - query_by_contact — сводная карточка человека: данные контакта, связанные задачи, обязательства, предстоящие встречи («что у меня с Аней», «всё по Петру», «покажи карточку Васи»). Поле: name_hint (имя, подстрока).
@@ -652,6 +659,9 @@ class IntentRouter:
 
         if intent == "inbox_reclassify":
             return self._resolve_inbox_reclassify(data, low)
+
+        if intent == "inbox_to_task":
+            return self._resolve_inbox_to_task(data, low)
 
         if intent in ("log_decision", "query_decisions"):
             # Обе операции требуют LLM/память — роутер лишь гейтит их safe и
@@ -1069,6 +1079,42 @@ class IntentRouter:
             "inbox_reclassify",
             {"type": "reclassify_inbox", "item_id": int(rec["entity_id"]), "status": status},
             f"отложить запись инбокса в «{label}»?", low,
+        )
+
+    # --- Конвертация записи инбокса в задачу (inbox_to_task) ------------------
+    # Ищем нужную запись по нечёткому hint среди ещё не разобранных (как
+    # title_hint/name_hint), и создаём из неё задачу той же общей функцией, что и
+    # REST-эндпоинт дашборда. Risk safe → сразу. Логируется как task/create
+    # (см. _LOGGED), значит отменяемо через undo_last. Ничего не нашли — честный
+    # ответ, не молчаливый no-op.
+
+    def _find_inbox(self, hint: str | None) -> list[dict]:
+        """Ещё не разобранные записи инбокса, чей текст содержит hint (без учёта
+        регистра). processed-записи не предлагаем — их уже разобрали."""
+        hint = (hint or "").strip().lower()
+        if not hint or self.inbox is None:
+            return []
+        return [it for it in self.inbox.list()
+                if it["status"] != "processed" and hint in it["text"].lower()]
+
+    def _resolve_inbox_to_task(self, data: dict, low: bool) -> Resolution:
+        if self.inbox is None:
+            return Resolution("message", text="Инбокс не настроен 🤔")
+        hint = data.get("title_hint") or data.get("note") or data.get("title")
+        matches = self._find_inbox(hint)
+        if not matches:
+            return Resolution(
+                "message",
+                text=f"Не нашёл в инбоксе ничего похожего на «{(hint or '').strip()}».",
+            )
+        if len(matches) > 1:
+            previews = ", ".join(f"«{m['text']}»" for m in matches[:5])
+            return Resolution("message", text=f"Нашёл несколько записей: {previews}. Уточни, какую именно.")
+        item = matches[0]
+        return self._gate(
+            "inbox_to_task",
+            {"type": "inbox_to_task", "item_id": item["id"], "text": item["text"]},
+            f"превратить в задачу «{item['text']}»?", low,
         )
 
     # --- Read-it-later (§15) -------------------------------------------------
@@ -1604,6 +1650,14 @@ class IntentRouter:
             assert self.inbox is not None
             self.inbox.delete(action["item_id"])
             return "↩️ Убрал запись из инбокса", str(action["item_id"]), None, True
+        if kind == "inbox_to_task":  # конвертация записи инбокса в задачу (та же общая функция, что у REST)
+            assert self.inbox is not None
+            item = self.inbox.get(int(action["item_id"]))
+            if item is None:
+                return "Запись инбокса не найдена 🤔", None, None, False
+            # logged как task/create (см. _LOGGED) → entity_id/after про задачу, отменяемо
+            task = convert_inbox_item_to_task(self.tasks, self.inbox, item)
+            return f"✅ Создал задачу из инбокса: «{task['title']}»", str(task["id"]), task, True
         if kind in ("create_contact", "update_contact", "edit_contact", "restore_contact",
                     "delete_contact", "query_contacts"):
             return self._apply_contact(action)

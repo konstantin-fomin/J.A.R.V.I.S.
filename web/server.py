@@ -24,6 +24,7 @@ from pydantic import BaseModel
 import config
 from bills import BillStore, current_month
 from contacts import days_until_birthday
+from inbox import convert_inbox_item_to_task
 from intents import guard_chat_answer
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
@@ -272,6 +273,18 @@ def create_app(
         if not text:
             raise HTTPException(status_code=400, detail="Пустой text")
         return {"item": inbox.create(text, source="dashboard")}
+
+    @app.post("/api/inbox/{item_id}/to-task")
+    def inbox_to_task(item_id: int) -> dict:
+        # Конвертация записи инбокса в задачу из дашборда. Напрямую через сторы,
+        # мимо IntentRouter/ActionLog — как PATCH /api/tasks и /api/bills (§10,
+        # известное ограничение дашборд-API, не баг). Без LLM — дословный текст.
+        if inbox is None:
+            raise HTTPException(status_code=503, detail="Инбокс не настроен")
+        item = inbox.get(item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Запись инбокса не найдена")
+        return {"task": convert_inbox_item_to_task(tasks, inbox, item)}
 
     @app.get("/api/contacts/birthdays")
     def upcoming_birthdays(days: int = 7) -> dict:
