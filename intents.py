@@ -28,6 +28,7 @@ INTENTS = {
     "delete_task",
     "query_tasks",
     "mark_bill_paid",
+    "create_bills_batch",
     "query_bills",
     "create_event",
     "move_event",
@@ -72,6 +73,10 @@ RISK_LEVELS = {
     "delete_task": "dangerous",
     "query_tasks": "medium",
     "mark_bill_paid": "medium",
+    # create_bills_batch — medium, НО resolve всегда показывает предпросмотр (§3-bis):
+    # это создание нескольких финансовых записей, ошибка дороже одной задачи. Уровень
+    # тут только ради полноты таблицы — фактическое подтверждение делает _resolve_bills_batch.
+    "create_bills_batch": "medium",
     "query_bills": "medium",
     "create_event": "dangerous",
     "move_event": "dangerous",
@@ -217,6 +222,7 @@ PROMPT = """Ты — парсер намерений личного ассист
 - delete_task — удалить задачу. Поле: title_hint.
 - query_tasks — показать задачи. Поле: filter ("today"|"all"|null).
 - mark_bill_paid — отметить платёж оплаченным. Поле: name_hint.
+- create_bills_batch — завести СРАЗУ НЕСКОЛЬКО регулярных (ежемесячных) платежей из списка в одном сообщении («запиши платежи в июле: 40000 за дом 1 июля, 13700 пэй 2 июля, 14500 кредит до 14 июля»). Поле: bills — массив объектов {{"name": строка, "amount": число, "day_of_month": число 1-31, "category": строка или null}}. day_of_month — день месяца платежа; извлекай из ЛЮБОЙ формы: «1 июля»→1, «до 14 июля»→14, «14-го»→14, «5 числа»→5 (год/месяц игнорируй — это про день ежемесячного платежа). name — короткое за-что: «за дом»→«дом», «кредитка»→«кредитка», «за машину»→«машина». amount — сумма числом без пробелов. Один платёж в сообщении — тоже create_bills_batch с массивом из одного объекта. Это про РЕГУЛЯРНЫЕ платежи (шаблоны), а не разовые дела (то — create_task).
 - query_bills — показать платежи текущего месяца.
 - create_event — создать встречу/событие в календаре. Поля: title, date ("ГГГГ-ММ-ДД"), start_time ("ЧЧ:ММ"), end_time ("ЧЧ:ММ" или null).
 - move_event — перенести встречу на другое время. Поля: title_hint, date (новая дата), start_time (новое время).
@@ -256,12 +262,12 @@ PROMPT = """Ты — парсер намерений личного ассист
 - capture — это явный захват в инбокс. Срабатывает ТОЛЬКО на явный триггер: «запиши в инбокс», «в инбокс», «на заметку», «потом разберу», «закинь в инбокс». Без такого триггера это НЕ capture (обычная мысль/идея без триггера → none, конкретное дело → create_task). note — текст записи без самого триггера.
 - Относительные даты («завтра», «в пятницу», «через неделю») переводи в due_date/date относительно «сегодня».
 - Задача (task) — это дело/напоминание без конкретного времени-слота; встреча (event) — это про календарь, со временем начала. «Созвон в 15:00», «встреча с врачом завтра в 10» → create_event. «Купить молоко», «полить цветы» → create_task.
-- Заводить шаблон платежа через текст нельзя — это none.
+- Заводить регулярные платежи списком из свободного текста можно — это create_bills_batch (см. выше). Срабатывает только когда пользователь явно перечисляет платежи/счета с суммами и днями.
 - confidence: "high" если намерение явное и однозначное, "low" если есть сомнения.
-- is_action_request: поставь true, ТОЛЬКО когда пользователь просит ВЫПОЛНИТЬ действие (создать/записать/изменить/удалить что-то), но НИ ОДИН intent выше не подходит — например, разом завести несколько платежей (отдельной команды нет). Тогда верни {{"intent": "none", "is_action_request": true}}: бот честно откажет, а не сымитирует выполнение. Для обычного разговора, вопроса или болтовни — false.
+- is_action_request: поставь true, ТОЛЬКО когда пользователь просит ВЫПОЛНИТЬ действие (создать/записать/изменить/удалить что-то), но НИ ОДИН intent выше не подходит (например, действие, которого бот не умеет). Тогда верни {{"intent": "none", "is_action_request": true}}: бот честно откажет, а не сымитирует выполнение. Для обычного разговора, вопроса или болтовни — false. ВНИМАНИЕ: список платежей с суммами — это create_bills_batch, НЕ is_action_request.
 
 Верни JSON строго такого вида (лишние поля оставляй null):
-{{"intent": "...", "confidence": "high|low", "is_action_request": false, "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null, "person": null, "direction": null, "follow_up_date": null, "related_project": null, "status": null, "text": null}}
+{{"intent": "...", "confidence": "high|low", "is_action_request": false, "title": null, "due_date": null, "due_time": null, "priority": "normal", "title_hint": null, "name_hint": null, "filter": null, "date": null, "start_time": null, "end_time": null, "project": null, "note": null, "name": null, "birthday": null, "url": null, "field": null, "value": null, "recurrence_type": null, "day_of_week": null, "day_of_month": null, "time": null, "offset": null, "person": null, "direction": null, "follow_up_date": null, "related_project": null, "status": null, "text": null, "bills": null}}
 
 Сообщение пользователя:
 {text}"""
@@ -312,6 +318,10 @@ def parse_intent(llm, text: str, today: str | None = None) -> dict:
         found = _EMAIL_FIND.search(text)
         if found:
             data["email"] = found.group(0)
+    # §3-bis: bulk-платежи — гарантируем, что bills всегда список (валидацию
+    # каждого элемента делает _resolve_bills_batch).
+    if data["intent"] == "create_bills_batch" and not isinstance(data.get("bills"), list):
+        data["bills"] = []
     return data
 
 
@@ -591,6 +601,9 @@ class IntentRouter:
                 low,
             )
 
+        if intent == "create_bills_batch":
+            return self._resolve_bills_batch(data)
+
         if intent == "query_tasks":
             return self._gate(
                 intent, {"type": "query_tasks", "filter": data.get("filter")}, "показать задачи?", low
@@ -680,6 +693,71 @@ class IntentRouter:
         if risk == "dangerous" or (risk == "medium" and low):
             return Resolution("confirm", action=action, label=label)
         return Resolution("execute", action=action)
+
+    # --- Bulk-создание платежей (§3-bis) -------------------------------------
+    # Список платежей из свободного текста → массив шаблонов. ВСЕГДА предпросмотр
+    # (даже при high confidence): это несколько финансовых записей, ошибка дороже
+    # одной задачи. По «Да» execute создаёт каждый через BillStore.create_template
+    # и логирует отдельной записью (entity_type=bill_template) — каждая отменяема
+    # undo_last по отдельности. Распарсить нечего → честный отказ, не молчаливый no-op.
+
+    _BILLS_BATCH_REFUSAL = (
+        "Не смог разобрать платежи из сообщения 🤔 Опиши проще или по одному — "
+        "например: «60000 за дом 1 числа»."
+    )
+
+    def _resolve_bills_batch(self, data: dict) -> Resolution:
+        raw = data.get("bills")
+        items: list[dict] = []
+        for it in raw if isinstance(raw, list) else []:
+            clean = self._clean_bill_item(it)
+            if clean is not None:
+                items.append(clean)
+        if not items:
+            return Resolution("message", text=self._BILLS_BATCH_REFUSAL)
+        return Resolution(
+            "confirm",
+            action={"type": "create_bills_batch", "items": items},
+            label=self._format_bills_batch_preview(items),
+        )
+
+    @staticmethod
+    def _clean_bill_item(it) -> dict | None:
+        """Один элемент массива bills → нормализованный dict или None (отсев мусора).
+        Требуем непустое имя и день месяца 1-31; сумма/категория необязательны."""
+        if not isinstance(it, dict):
+            return None
+        name = str(it.get("name") or "").strip()
+        raw_day = it.get("day_of_month")
+        if raw_day is None:
+            return None
+        try:
+            day = int(raw_day)
+        except (TypeError, ValueError):
+            return None
+        if not name or not (1 <= day <= 31):
+            return None
+        amount = it.get("amount")
+        try:
+            amount = float(amount) if amount is not None and str(amount).strip() != "" else None
+        except (TypeError, ValueError):
+            amount = None
+        clean = {"name": name, "day_of_month": day, "amount": amount}
+        category = str(it.get("category") or "").strip()
+        if category:
+            clean["category"] = category
+        return clean
+
+    @staticmethod
+    def _format_bills_batch_preview(items: list[dict]) -> str:
+        """Предпросмотр распарсенного списка для подтверждения Да/Нет."""
+        lines = ["Понял так:"]
+        for i, it in enumerate(items, 1):
+            amount = it.get("amount")
+            amt = f"{amount:,.0f}".replace(",", " ") if amount is not None else "сумма не указана"
+            lines.append(f"{i}) {it['name']} — {amt}, ежемесячно {it['day_of_month']} числа")
+        lines.append("\nСоздать эти платежи?")
+        return "\n".join(lines)
 
     # --- Контакты (лёгкий CRM, §14) ------------------------------------------
     # create/update — auto-or-confirm (как задачи); delete — всегда Да/Нет;
@@ -1202,6 +1280,11 @@ class IntentRouter:
                 return {"type": "set_bill_status", "instance_id": int(eid),
                         "status": status, "name": name}
 
+        if et == "bill_template":
+            if act == "create":  # bulk-создание (§3-bis): откат = удалить шаблон
+                return {"type": "delete_bill_template", "template_id": int(eid),
+                        "name": (after or {}).get("name", "")}
+
         if et == "contact":
             if act == "create":  # создали → удаляем
                 return {"type": "delete_contact", "contact_id": int(eid),
@@ -1398,6 +1481,10 @@ class IntentRouter:
 
         Реверс самой отмены (несёт _undo_log_id) новую запись не пишет, а помечает
         исходную undone — иначе повторный undo откатывал бы сам откат."""
+        # Bulk-платежи (§3-bis) создают НЕСКОЛЬКО сущностей за раз — у каждой своя
+        # запись в журнале, поэтому общий путь _LOGGED (одна запись) им не подходит.
+        if action["type"] == "create_bills_batch":
+            return self._execute_bills_batch(action)
         # Служебные ключи журнала вынимаем, чтобы не мешали логике действия.
         raw_message = action.pop("raw_message", None)
         source = action.pop("source", "telegram")
@@ -1422,6 +1509,27 @@ class IntentRouter:
                     raw_message=raw_message,
                 )
         return reply
+
+    def _execute_bills_batch(self, action: dict) -> str:
+        """Создаёт пакет платежей (§3-bis) через штатный BillStore.create_template.
+        Каждый шаблон — отдельная запись журнала (entity_type=bill_template), чтобы
+        его можно было отменить undo_last по отдельности (не групповым undo)."""
+        raw_message = action.get("raw_message")
+        source = action.get("source", "telegram")
+        lines = ["✅ Создал платежи:"]
+        for it in action.get("items", []):
+            t = self.bills.create_template(
+                name=it["name"], day_of_month=it["day_of_month"],
+                amount=it.get("amount"), category=it.get("category"),
+            )
+            if self.log is not None:
+                self.log.log_action(
+                    source=source, entity_type="bill_template", entity_id=str(t["id"]),
+                    action="create", before_state=None, after_state=t, raw_message=raw_message,
+                )
+            amt = f" — {t['amount']:,.0f}".replace(",", " ") if t["amount"] is not None else ""
+            lines.append(f"• {t['name']}{amt}, ежемесячно {t['day_of_month']} числа")
+        return "\n".join(lines)
 
     def _apply(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
         """Выполняет действие. Возвращает (ответ, entity_id, after_state, ok).
@@ -1512,6 +1620,9 @@ class IntentRouter:
         if kind == "set_bill_status":  # реверс undo: вернуть платёж в прежний статус
             after = self.bills.set_status(action["instance_id"], action["status"])
             return f"↩️ Платёж «{action['name']}» снова в ожидании", str(action["instance_id"]), after, True
+        if kind == "delete_bill_template":  # реверс undo bulk-создания платежа (§3-bis)
+            self.bills.delete_template(action["template_id"])
+            return f"↩️ Убрал платёж «{action['name']}»", str(action["template_id"]), None, True
         if kind == "query_bills":
             from bot.handlers import format_bills  # отложенный импорт: bot.handlers импортирует этот модуль
 

@@ -126,6 +126,14 @@ class BillStore:
             )
         return self.get_template(template_id)
 
+    def delete_template(self, template_id: int) -> None:
+        """Удаляет шаблон вместе с его начислениями. Нужен для undo_last после
+        bulk-создания платежей (§3-bis): откат создания шаблона = его удаление.
+        Начисления сносим первыми — иначе остались бы висячие ссылки."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM bill_instances WHERE template_id = ?", (template_id,))
+            conn.execute("DELETE FROM bill_templates WHERE id = ?", (template_id,))
+
     # --- Начисления --------------------------------------------------------
 
     def ensure_month(self, year_month: str) -> int:
