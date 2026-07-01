@@ -198,7 +198,9 @@ def create_app(
         ym = month or current_month()
         # Лениво создаём начисления месяца при первом обращении в этом месяце
         bills.ensure_month(ym)
-        return {"month": ym, "bills": bills.list_instances(ym)}
+        # Единый список: регулярные начисления + разовые платежи (§3-bis-2) —
+        # дашборду/боту без разницы, откуда запись (см. BillStore.list_month)
+        return {"month": ym, "bills": bills.list_month(ym)}
 
     @app.get("/api/bills/templates")
     def list_bill_templates() -> dict:
@@ -227,13 +229,19 @@ def create_app(
             raise HTTPException(status_code=400, detail="day_of_month должен быть 1-31")
         return {"template": bills.update_template(template_id, **fields)}
 
-    @app.patch("/api/bills/{instance_id}")
-    def update_bill_instance(instance_id: int, req: BillInstanceUpdate) -> dict:
-        if not bills.get_instance(instance_id):
+    @app.patch("/api/bills/{bill_id}")
+    def update_bill_instance(bill_id: str, req: BillInstanceUpdate) -> dict:
+        # bill_id — составной ("r<id>"/"o<id>", §3-bis-2): BillStore сам решает,
+        # регулярное начисление это или разовый платёж — дашборду без разницы.
+        try:
+            existing = bills.get_bill(bill_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Начисление не найдено") from None
+        if not existing:
             raise HTTPException(status_code=404, detail="Начисление не найдено")
         if req.status is not None and req.status not in ("pending", "paid"):
             raise HTTPException(status_code=400, detail="status должен быть pending или paid")
-        return {"bill": bills.set_status(instance_id, req.status)}
+        return {"bill": bills.set_bill_status(bill_id, req.status)}
 
     @app.get("/api/calendar/today")
     def calendar_today() -> list:

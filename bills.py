@@ -1,11 +1,25 @@
 """SQLite-хранилище платежей. Простая обёртка без ORM — как tasks.py.
 
-Две таблицы (паттерн Recurring: шаблон → инстанс на период):
-  bill_templates  — что и когда платить (создаётся редко)
+Три таблицы:
+  bill_templates  — регулярный платёж, что и когда платить (паттерн Recurring:
+                    шаблон → инстанс на период; создаётся редко)
   bill_instances  — конкретное начисление на месяц (авто от активных шаблонов)
+  one_time_bills  — разовый платёж с конкретной датой (YYYY-MM-DD), БЕЗ шаблона.
+                    Отдельная сущность намеренно (§3-bis-2): у bill_templates
+                    в принципе нет способа выразить «заплатить один раз 14 июля»
+                    — только «N-го числа каждый месяц» (day_of_month без года/
+                    месяца). Раньше разовые платежи ошибочно заводили как
+                    регулярные шаблоны — те молча плодили начисления каждый
+                    месяц вместо одного платежа.
 
-Разделение уровней принципиально: «оплачено» в июне не должно остаться
-«оплачено» в июле. Таблицы создаются автоматически при первом обращении.
+Разделение bill_templates/bill_instances принципиально: «оплачено» в июне не
+должно остаться «оплачено» в июле. Таблицы создаются автоматически при первом
+обращении.
+
+Единый доступ к обеим сущностям (регулярной и разовой) — через составной id:
+"r<id>" (bill_instances) / "o<id>" (one_time_bills), см. list_month/get_bill/
+set_bill_status/due_on. Вызывающий код (дашборд, бот, IntentRouter) работает
+только с составным id и полем kind — никогда не лезет в таблицы напрямую.
 """
 import calendar
 import datetime
@@ -70,6 +84,20 @@ class BillStore:
                     paid_at TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(template_id, year_month)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS one_time_bills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    amount REAL,
+                    due_date TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    paid_at TEXT,
+                    category TEXT,
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -180,18 +208,6 @@ class BillStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def due_on(self, due_date: str, status: Optional[str] = None) -> list[dict]:
-        """Начисления с конкретной датой — для напоминаний планировщика."""
-        query = f"{self._INSTANCE_SELECT} WHERE i.due_date = ?"
-        params: list = [due_date]
-        if status:
-            query += " AND i.status = ?"
-            params.append(status)
-        query += " ORDER BY i.id"
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
-
     def set_status(self, instance_id: int, status: Optional[str]) -> Optional[dict]:
         if status is None:
             return self.get_instance(instance_id)
@@ -202,6 +218,130 @@ class BillStore:
                 (status, paid_at, instance_id),
             )
         return self.get_instance(instance_id)
+
+    # --- Разовые платежи (one_time_bills, §3-bis-2) -------------------------
+
+    def create_one_time(
+        self,
+        name: str,
+        due_date: str,
+        amount: Optional[float] = None,
+        category: Optional[str] = None,
+    ) -> dict:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO one_time_bills "
+                "(name, amount, due_date, status, category, created_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?)",
+                (name, amount, due_date, category, now),
+            )
+            one_time_id = cur.lastrowid
+        return self.get_one_time(one_time_id)
+
+    def get_one_time(self, one_time_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM one_time_bills WHERE id = ?", (one_time_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_one_time(self, year_month: Optional[str] = None) -> list[dict]:
+        query = "SELECT * FROM one_time_bills"
+        params: list = []
+        if year_month:
+            query += " WHERE due_date LIKE ?"
+            params.append(f"{year_month}-%")
+        query += " ORDER BY due_date, id"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_one_time_status(self, one_time_id: int, status: Optional[str]) -> Optional[dict]:
+        if status is None:
+            return self.get_one_time(one_time_id)
+        paid_at = datetime.datetime.now(datetime.timezone.utc).isoformat() if status == "paid" else None
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE one_time_bills SET status = ?, paid_at = ? WHERE id = ?",
+                (status, paid_at, one_time_id),
+            )
+        return self.get_one_time(one_time_id)
+
+    def delete_one_time(self, one_time_id: int) -> None:
+        """Удаляет разовый платёж. Нужен для undo_last после его создания."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM one_time_bills WHERE id = ?", (one_time_id,))
+
+    # --- Единый доступ к регулярным + разовым платежам ----------------------
+    # Составной id ("r<id>"/"o<id>") — единственное, что видит вызывающий код
+    # (дашборд, бот, IntentRouter); какая это таблица внутри — их не касается.
+
+    def list_month(self, year_month: str) -> list[dict]:
+        """Единый список платежей месяца: bill_instances + one_time_bills,
+        отсортированные по due_date. Дашборду/боту без разницы, откуда запись."""
+        regular = [
+            {**b, "id": f"r{b['id']}", "kind": "regular"}
+            for b in self.list_instances(year_month)
+        ]
+        one_time = [
+            {**b, "id": f"o{b['id']}", "kind": "one_time"}
+            for b in self.list_one_time(year_month)
+        ]
+        combined = regular + one_time
+        combined.sort(key=lambda b: (b["due_date"], b["id"]))
+        return combined
+
+    def get_bill(self, bill_id: str) -> Optional[dict]:
+        """Универсальный geter по составному id — сама решает, в какую таблицу
+        смотреть по префиксу."""
+        kind, raw_id = _split_bill_id(bill_id)
+        row = self.get_instance(raw_id) if kind == "regular" else self.get_one_time(raw_id)
+        if row is None:
+            return None
+        return {**row, "id": bill_id, "kind": kind}
+
+    def set_bill_status(self, bill_id: str, status: Optional[str]) -> Optional[dict]:
+        """Универсальный сеттер статуса по составному id — сама решает, в какую
+        таблицу писать. mark_bill_paid/undo используют только этот метод."""
+        kind, raw_id = _split_bill_id(bill_id)
+        row = (
+            self.set_status(raw_id, status) if kind == "regular"
+            else self.set_one_time_status(raw_id, status)
+        )
+        if row is None:
+            return None
+        return {**row, "id": bill_id, "kind": kind}
+
+    def due_on(self, due_date: str, status: Optional[str] = None) -> list[dict]:
+        """Платежи (регулярные + разовые) с конкретной датой — для напоминаний
+        планировщика и /today. Единый формат — см. list_month."""
+        query = f"{self._INSTANCE_SELECT} WHERE i.due_date = ?"
+        one_time_query = "SELECT * FROM one_time_bills WHERE due_date = ?"
+        params: list = [due_date]
+        if status:
+            query += " AND i.status = ?"
+            one_time_query += " AND status = ?"
+            params.append(status)
+        with self._connect() as conn:
+            regular_rows = conn.execute(f"{query} ORDER BY i.id", params).fetchall()
+            one_time_rows = conn.execute(f"{one_time_query} ORDER BY id", params).fetchall()
+        regular = [{**dict(r), "id": f"r{r['id']}", "kind": "regular"} for r in regular_rows]
+        one_time = [{**dict(r), "id": f"o{r['id']}", "kind": "one_time"} for r in one_time_rows]
+        return regular + one_time
+
+
+def _split_bill_id(bill_id: str) -> tuple[str, int]:
+    """Составной id ("r12"/"o7") → (kind, raw_id). Единственное место, где
+    парсится префикс — внешний код (бот/REST/intents) через него не лезет."""
+    if not bill_id or bill_id[0] not in ("r", "o"):
+        raise ValueError(f"Некорректный id платежа: {bill_id!r}")
+    kind = "regular" if bill_id[0] == "r" else "one_time"
+    try:
+        raw_id = int(bill_id[1:])
+    except ValueError:
+        raise ValueError(f"Некорректный id платежа: {bill_id!r}") from None
+    return kind, raw_id
 
 
 def current_month() -> str:

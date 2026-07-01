@@ -228,7 +228,12 @@ PROMPT = """Ты — парсер намерений личного ассист
 - delete_task — удалить задачу. Поле: title_hint.
 - query_tasks — показать задачи. Поле: filter ("today"|"all"|null).
 - mark_bill_paid — отметить платёж оплаченным. Поле: name_hint.
-- create_bills_batch — завести СРАЗУ НЕСКОЛЬКО регулярных (ежемесячных) платежей из списка в одном сообщении («запиши платежи в июле: 40000 за дом 1 июля, 13700 пэй 2 июля, 14500 кредит до 14 июля»). Поле: bills — массив объектов {{"name": строка, "amount": число, "day_of_month": число 1-31, "category": строка или null}}. day_of_month — день месяца платежа; извлекай из ЛЮБОЙ формы: «1 июля»→1, «до 14 июля»→14, «14-го»→14, «5 числа»→5 (год/месяц игнорируй — это про день ежемесячного платежа). name — короткое за-что: «за дом»→«дом», «кредитка»→«кредитка», «за машину»→«машина». amount — сумма числом без пробелов. Один платёж в сообщении — тоже create_bills_batch с массивом из одного объекта. Это про РЕГУЛЯРНЫЕ платежи (шаблоны), а не разовые дела (то — create_task).
+- create_bills_batch — завести один или несколько платежей из списка в одном сообщении («запиши платежи в июле: 40000 за дом 1 июля, 13700 пэй 2 июля, 14500 кредит до 14 июля» или «интернет 800 каждый месяц 5 числа»). Поле: bills — массив объектов {{"name": строка, "amount": число или null, "kind": "regular"|"one_time", "day_of_month": число 1-31 или null, "due_date": "ГГГГ-ММ-ДД" или null, "category": строка или null}}.
+  kind — классифицируй КАЖДУЮ строку списка НЕЗАВИСИМО от остальных:
+  * "regular" — ТОЛЬКО если в тексте есть явный маркер повторения: «каждый месяц», «ежемесячно», «постоянно», «регулярно». Тогда day_of_month — день месяца (число 1-31, год/месяц игнорируй), due_date — null.
+  * "one_time" — ВСЕ остальные случаи, включая обычную дату без маркера повторения («1 июля», «до 14 июля», «14-го», «5 числа»). due_date — конкретная дата "ГГГГ-ММ-ДД" (год бери из {date}, если месяц/день уже прошли в этом году — следующий), day_of_month — null.
+  Если неоднозначно (нет явного маркера регулярности рядом с этой строкой) — ВСЕГДА выбирай "one_time": пропущенный разовый платёж просто не появится повторно и будет замечен, а разовый платёж, ошибочно ставший регулярным, будет молча плодить лишние начисления каждый месяц.
+  name — короткое за-что: «за дом»→«дом», «кредитка»→«кредитка», «за машину»→«машина». amount — сумма числом без пробелов. Один платёж в сообщении — тоже create_bills_batch с массивом из одного объекта.
 - query_bills — показать платежи текущего месяца.
 - create_event — создать встречу/событие в календаре. Поля: title, date ("ГГГГ-ММ-ДД"), start_time ("ЧЧ:ММ"), end_time ("ЧЧ:ММ" или null).
 - move_event — перенести встречу на другое время. Поля: title_hint, date (новая дата), start_time (новое время).
@@ -532,7 +537,7 @@ class IntentRouter:
         self.bills.ensure_month(ym)
         return [
             b
-            for b in self.bills.list_instances(ym)
+            for b in self.bills.list_month(ym)
             if hint in b["name"].lower() and b["status"] != "paid"
         ]
 
@@ -603,7 +608,7 @@ class IntentRouter:
             bill = matches[0]
             return self._gate(
                 intent,
-                {"type": "mark_bill_paid", "instance_id": bill["id"], "name": bill["name"]},
+                {"type": "mark_bill_paid", "bill_id": bill["id"], "name": bill["name"]},
                 f"отметить платёж «{bill['name']}» оплаченным?",
                 low,
             )
@@ -734,38 +739,60 @@ class IntentRouter:
     @staticmethod
     def _clean_bill_item(it) -> dict | None:
         """Один элемент массива bills → нормализованный dict или None (отсев мусора).
-        Требуем непустое имя и день месяца 1-31; сумма/категория необязательны."""
+        Требуем непустое имя; regular — день месяца 1-31, one_time — валидная
+        due_date. kind отсутствует/не "regular" → дефолт "one_time" — тот же
+        защитный дефолт, что и в промпте (§3-bis-2): пропущенный разовый платёж
+        просто не появится повторно и будет замечен, а разовый платёж, ошибочно
+        ставший регулярным, будет молча плодить начисления каждый месяц."""
         if not isinstance(it, dict):
             return None
         name = str(it.get("name") or "").strip()
-        raw_day = it.get("day_of_month")
-        if raw_day is None:
-            return None
-        try:
-            day = int(raw_day)
-        except (TypeError, ValueError):
-            return None
-        if not name or not (1 <= day <= 31):
+        if not name:
             return None
         amount = it.get("amount")
         try:
             amount = float(amount) if amount is not None and str(amount).strip() != "" else None
         except (TypeError, ValueError):
             amount = None
-        clean = {"name": name, "day_of_month": day, "amount": amount}
         category = str(it.get("category") or "").strip()
+
+        kind = "regular" if it.get("kind") == "regular" else "one_time"
+        if kind == "regular":
+            raw_day = it.get("day_of_month")
+            if raw_day is None:
+                return None
+            try:
+                day = int(raw_day)
+            except (TypeError, ValueError):
+                return None
+            if not (1 <= day <= 31):
+                return None
+            clean = {"name": name, "kind": "regular", "day_of_month": day, "amount": amount}
+        else:
+            due_date = str(it.get("due_date") or "").strip()
+            try:
+                date.fromisoformat(due_date)
+            except ValueError:
+                return None
+            clean = {"name": name, "kind": "one_time", "due_date": due_date, "amount": amount}
         if category:
             clean["category"] = category
         return clean
 
     @staticmethod
     def _format_bills_batch_preview(items: list[dict]) -> str:
-        """Предпросмотр распарсенного списка для подтверждения Да/Нет."""
+        """Предпросмотр распарсенного списка для подтверждения Да/Нет — явно
+        показывает тип каждой строки (regular/one_time), чтобы ошибку
+        классификации было видно ДО подтверждения, не после (§3-bis-2)."""
         lines = ["Понял так:"]
         for i, it in enumerate(items, 1):
             amount = it.get("amount")
             amt = f"{amount:,.0f}".replace(",", " ") if amount is not None else "сумма не указана"
-            lines.append(f"{i}) {it['name']} — {amt}, ежемесячно {it['day_of_month']} числа")
+            when = (
+                f"ежемесячно {it['day_of_month']} числа" if it["kind"] == "regular"
+                else f"разово, {it['due_date']}"
+            )
+            lines.append(f"{i}) {it['name']} — {amt}, {when}")
         lines.append("\nСоздать эти платежи?")
         return "\n".join(lines)
 
@@ -1323,12 +1350,18 @@ class IntentRouter:
             if act == "mark_paid":  # оплачено → вернуть прежний статус (pending)
                 status = (before or {}).get("status") or "pending"
                 name = (before or after or {}).get("name", "")
-                return {"type": "set_bill_status", "instance_id": int(eid),
+                # eid — составной bill_id ("r12"/"o7"), не парсим int (§3-bis-2)
+                return {"type": "set_bill_status", "bill_id": eid,
                         "status": status, "name": name}
 
         if et == "bill_template":
             if act == "create":  # bulk-создание (§3-bis): откат = удалить шаблон
                 return {"type": "delete_bill_template", "template_id": int(eid),
+                        "name": (after or {}).get("name", "")}
+
+        if et == "bill_one_time":
+            if act == "create":  # bulk-создание разового платежа (§3-bis-2): откат = удалить
+                return {"type": "delete_one_time_bill", "one_time_id": int(eid),
                         "name": (after or {}).get("name", "")}
 
         if et == "contact":
@@ -1557,24 +1590,39 @@ class IntentRouter:
         return reply
 
     def _execute_bills_batch(self, action: dict) -> str:
-        """Создаёт пакет платежей (§3-bis) через штатный BillStore.create_template.
-        Каждый шаблон — отдельная запись журнала (entity_type=bill_template), чтобы
-        его можно было отменить undo_last по отдельности (не групповым undo)."""
+        """Создаёт пакет платежей (§3-bis/§3-bis-2): regular — через
+        BillStore.create_template (entity_type=bill_template), one_time — через
+        BillStore.create_one_time (entity_type=bill_one_time). Каждая запись —
+        отдельная запись журнала, отменяема undo_last по отдельности (не
+        групповым undo)."""
         raw_message = action.get("raw_message")
         source = action.get("source", "telegram")
         lines = ["✅ Создал платежи:"]
         for it in action.get("items", []):
-            t = self.bills.create_template(
-                name=it["name"], day_of_month=it["day_of_month"],
-                amount=it.get("amount"), category=it.get("category"),
-            )
-            if self.log is not None:
-                self.log.log_action(
-                    source=source, entity_type="bill_template", entity_id=str(t["id"]),
-                    action="create", before_state=None, after_state=t, raw_message=raw_message,
+            if it["kind"] == "regular":
+                t = self.bills.create_template(
+                    name=it["name"], day_of_month=it["day_of_month"],
+                    amount=it.get("amount"), category=it.get("category"),
                 )
-            amt = f" — {t['amount']:,.0f}".replace(",", " ") if t["amount"] is not None else ""
-            lines.append(f"• {t['name']}{amt}, ежемесячно {t['day_of_month']} числа")
+                if self.log is not None:
+                    self.log.log_action(
+                        source=source, entity_type="bill_template", entity_id=str(t["id"]),
+                        action="create", before_state=None, after_state=t, raw_message=raw_message,
+                    )
+                amt = f" — {t['amount']:,.0f}".replace(",", " ") if t["amount"] is not None else ""
+                lines.append(f"• {t['name']}{amt}, ежемесячно {t['day_of_month']} числа")
+            else:
+                b = self.bills.create_one_time(
+                    name=it["name"], due_date=it["due_date"],
+                    amount=it.get("amount"), category=it.get("category"),
+                )
+                if self.log is not None:
+                    self.log.log_action(
+                        source=source, entity_type="bill_one_time", entity_id=str(b["id"]),
+                        action="create", before_state=None, after_state=b, raw_message=raw_message,
+                    )
+                amt = f" — {b['amount']:,.0f}".replace(",", " ") if b["amount"] is not None else ""
+                lines.append(f"• {b['name']}{amt}, разово {b['due_date']}")
         return "\n".join(lines)
 
     def _apply(self, action: dict) -> tuple[str, str | None, dict | None, bool]:
@@ -1672,20 +1720,23 @@ class IntentRouter:
         if kind in ("create_recurring_template", "delete_recurring_template", "query_recurring_tasks"):
             return self._apply_recurring(action)
         if kind == "mark_bill_paid":
-            after = self.bills.set_status(action["instance_id"], "paid")
-            return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["instance_id"]), after, True
+            after = self.bills.set_bill_status(action["bill_id"], "paid")
+            return f"✅ Платёж «{action['name']}» отмечен оплаченным", str(action["bill_id"]), after, True
         if kind == "set_bill_status":  # реверс undo: вернуть платёж в прежний статус
-            after = self.bills.set_status(action["instance_id"], action["status"])
-            return f"↩️ Платёж «{action['name']}» снова в ожидании", str(action["instance_id"]), after, True
+            after = self.bills.set_bill_status(action["bill_id"], action["status"])
+            return f"↩️ Платёж «{action['name']}» снова в ожидании", str(action["bill_id"]), after, True
         if kind == "delete_bill_template":  # реверс undo bulk-создания платежа (§3-bis)
             self.bills.delete_template(action["template_id"])
             return f"↩️ Убрал платёж «{action['name']}»", str(action["template_id"]), None, True
+        if kind == "delete_one_time_bill":  # реверс undo bulk-создания разового платежа (§3-bis-2)
+            self.bills.delete_one_time(action["one_time_id"])
+            return f"↩️ Убрал разовый платёж «{action['name']}»", str(action["one_time_id"]), None, True
         if kind == "query_bills":
             from bot.handlers import format_bills  # отложенный импорт: bot.handlers импортирует этот модуль
 
             ym = current_month()
             self.bills.ensure_month(ym)
-            items = self.bills.list_instances(ym)
+            items = self.bills.list_month(ym)
             if not items:
                 return "На этот месяц начислений нет.", None, None, False
             return format_bills(items, f"💳 Платежи за {ym}:"), None, None, False
@@ -1730,7 +1781,7 @@ class IntentRouter:
         if entity_type == "task":
             return self.tasks.get(action["task_id"])
         if entity_type == "bill":
-            return self.bills.get_instance(action["instance_id"])
+            return self.bills.get_bill(action["bill_id"])
         if entity_type == "contact":
             assert self.contacts is not None
             return self.contacts.get(action["contact_id"])

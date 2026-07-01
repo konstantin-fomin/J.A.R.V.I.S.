@@ -438,7 +438,7 @@ class Handlers:
         для /bills и NL-запроса query_bills."""
         ym = current_month()
         self.bills.ensure_month(ym)
-        instances = self.bills.list_instances(ym)
+        instances = self.bills.list_month(ym)
         if not instances:
             await reply_html(
                 update.message,
@@ -483,25 +483,32 @@ class Handlers:
             logger.debug("Не удалось обновить клавиатуру задач", exc_info=True)
 
     async def mark_paid(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Callback кнопки «✅ Оплачено»: PATCH status=paid для instance_id."""
+        """Callback кнопки «✅ Оплачено»: работает одинаково для регулярного
+        начисления и разового платежа (§3-bis-2) — bill_id составной («r<id>»/
+        «o<id>»), BillStore сам решает, в какую таблицу писать. Само изменение
+        статуса — через IntentRouter.execute (mark_bill_paid уже в _LOGGED),
+        поэтому действие журналируется и отменяемо через undo_last."""
         query = update.callback_query
         if not _allowed(update):
             await query.answer()
             return
+        bill_id = query.data[len(BILL_PAID_PREFIX):]
         try:
-            instance_id = int(query.data[len(BILL_PAID_PREFIX):])
-        except (ValueError, IndexError):
+            bill = self.bills.get_bill(bill_id)
+        except ValueError:
             await query.answer("Не понял кнопку 🤔")
             return
 
-        instance = self.bills.get_instance(instance_id)
-        if instance is None:
+        if bill is None:
             await query.answer("Платёж не найден")
-        elif instance["status"] == "paid":
+        elif bill["status"] == "paid":
             await query.answer("Уже отмечен оплаченным")
         else:
-            instance = self.bills.set_status(instance_id, "paid")
-            await query.answer(f"✅ {instance['name']} — оплачено")
+            await asyncio.to_thread(
+                self.router.execute,
+                {"type": "mark_bill_paid", "bill_id": bill_id, "name": bill["name"]},
+            )
+            await query.answer(f"✅ {bill['name']} — оплачено")
 
         # Убираем нажатую кнопку, остальные платежи оставляем доступными
         new_markup = _markup_without(query.message.reply_markup, query.data)

@@ -147,8 +147,9 @@ def test_mark_bill_paid_then_undo_sets_pending(router):
     bills.create_template("аренда", day_of_month=5, amount=100)
     bills.ensure_month(current_month())
     inst = bills.list_instances(current_month())[0]
+    bill_id = f"r{inst['id']}"
 
-    r.execute({"type": "mark_bill_paid", "instance_id": inst["id"], "name": inst["name"]})
+    r.execute({"type": "mark_bill_paid", "bill_id": bill_id, "name": inst["name"]})
     assert bills.get_instance(inst["id"])["status"] == "paid"
 
     res = r.resolve({"intent": "undo_last"})
