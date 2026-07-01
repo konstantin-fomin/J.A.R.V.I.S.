@@ -232,6 +232,22 @@ def test_user_authored_text_empty_when_all_bot():
     assert user_authored_text("- **10:00** [бот] только бот") == ""
 
 
+def test_user_authored_text_drops_refusal_lines():
+    # §13: обмен, где бот отказался/сконфабулировал (отмечен REFUSAL_AUTHOR при
+    # журналировании) — не мысль пользователя, режем как и [бот].
+    text = ("- **10:00** [я] купить молоко\n"
+            "- **10:01** [отказ] Запиши платежи в июле: 40000 за дом\n"
+            "- **11:00** [дневник] устал сегодня")
+    out = user_authored_text(text)
+    assert "купить молоко" in out
+    assert "устал сегодня" in out
+    assert "Запиши платежи" not in out
+
+
+def test_user_authored_text_empty_when_all_refusal():
+    assert user_authored_text("- **10:00** [отказ] 14500 кредит 14 июля") == ""
+
+
 def test_user_authored_text_passthrough_without_markers():
     # текст без журнальных записей (упрощённый/старый формат) не режем
     assert user_authored_text("просто текст") == "просто текст"
@@ -247,6 +263,22 @@ def test_bot_only_chunk_excluded_from_clustering(tmp_path):
         jchunk("бот", "записал про ремонт", date(2026, 6, 27), [0.9, 0.1, 0.0]),
     ])
     # бот-чанк — не источник: остаётся только 2 пользовательских → кластера нет
+    assert suggester(index, log).find_suggestions(today=TODAY) == []
+
+
+def test_refusal_chunk_excluded_from_clustering(tmp_path):
+    # Повторяющиеся неудавшиеся команды (журналируются под REFUSAL_AUTHOR) не
+    # должны питать кластеризацию §13, даже если их несколько подряд.
+    log = SuggestionLog(tmp_path / "s.db")
+    index = FakeIndex([
+        jchunk("я", "ремонт ванной", date(2026, 6, 20), [1.0, 0.0, 0.0]),
+        jchunk("я", "плитка для ванной", date(2026, 6, 24), [0.95, 0.05, 0.0]),
+        jchunk("отказ", "Запиши платежи в июле", date(2026, 6, 25), [0.9, 0.1, 0.0]),
+        jchunk("отказ", "Запиши платежи в июле ещё раз", date(2026, 6, 26), [0.9, 0.1, 0.0]),
+        jchunk("отказ", "14500 кредит 14 июля", date(2026, 6, 27), [0.9, 0.1, 0.0]),
+    ])
+    # три "отказ"-чанка сами по себе образовали бы кластер (>= min_cluster=3) —
+    # но как не-контент-автор они не входят в источник вовсе.
     assert suggester(index, log).find_suggestions(today=TODAY) == []
 
 

@@ -7,7 +7,14 @@
 llm.chat инъектируем фейком, отдающим заранее заданный «ответ модели».
 """
 import config
-from intents import PROMPT, guard_chat_answer, parse_intent, route_after_resolve
+from intents import (
+    CHAT_GUARD_REFUSAL,
+    PROMPT,
+    guard_chat_answer,
+    is_chat_refusal,
+    parse_intent,
+    route_after_resolve,
+)
 
 
 class FakeLLM:
@@ -130,12 +137,15 @@ def test_intent_prompt_requests_action_flag():
 # --- (1) guard_chat_answer: детерминированная последняя линия защиты ----------
 # Заменяет ответ честным отказом, если модель УТВЕРЖДАЕТ, что выполнила действие
 # со стором, которого на chat-пути быть не может. Срабатывает независимо от (2).
+# Возвращает (текст, guarded) — guarded нужен вызывающему коду, чтобы не журналировать
+# обмен как обычную мысль пользователя (§13).
 
 def test_guard_replaces_record_claim():
     answer = "Отлично, я записал твои платежи на июль. Я напомню тебе о них ближе к срокам."
-    out = guard_chat_answer(answer)
+    out, guarded = guard_chat_answer(answer)
     assert out != answer
     assert "не могу" in out.lower()
+    assert guarded is True
 
 
 def test_guard_catches_various_action_claims():
@@ -151,14 +161,18 @@ def test_guard_catches_various_action_claims():
         "Я напомню тебе о платеже ближе к сроку.",
     ]
     for c in claims:
-        assert guard_chat_answer(c) != c, f"guard пропустил имитацию: {c!r}"
+        out, guarded = guard_chat_answer(c)
+        assert out != c, f"guard пропустил имитацию: {c!r}"
+        assert guarded is True, f"guard не поднял флаг для: {c!r}"
 
 
 def test_guard_passes_honest_refusal_with_infinitives():
     # «не могу записать/создать» — инфинитивы, это честный отказ, НЕ имитация.
     txt = ("Я не могу записать сразу несколько платежей. "
            "Могу помочь записать их по одному или внести вручную.")
-    assert guard_chat_answer(txt) == txt
+    out, guarded = guard_chat_answer(txt)
+    assert out == txt
+    assert guarded is False
 
 
 def test_guard_passes_legit_memory_talk():
@@ -172,7 +186,25 @@ def test_guard_passes_legit_memory_talk():
         "Ты уже добавил это в свой список — отличная идея.",
     ]
     for ok in legit:
-        assert guard_chat_answer(ok) == ok, f"guard ложно сработал: {ok!r}"
+        out, guarded = guard_chat_answer(ok)
+        assert out == ok, f"guard ложно сработал: {ok!r}"
+        assert guarded is False
+
+
+# --- is_chat_refusal: сигнал «этот обмен не мысль пользователя» для §13 -------
+
+def test_is_chat_refusal_true_when_guarded():
+    assert is_chat_refusal("что угодно", guarded=True) is True
+
+
+def test_is_chat_refusal_true_on_literal_template_even_without_flag():
+    # Защита в глубину: если готовый текст отказа пришёл, минуя guard (guarded=False),
+    # всё равно распознаём его по точному совпадению с шаблоном.
+    assert is_chat_refusal(CHAT_GUARD_REFUSAL, guarded=False) is True
+
+
+def test_is_chat_refusal_false_for_ordinary_answer():
+    assert is_chat_refusal("Всплывшее яйцо не обязательно испорчено.", guarded=False) is False
 
 
 # --- b1: системный промпт chat-пайплайна запрещает имитацию действий ----------

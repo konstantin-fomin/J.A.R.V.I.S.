@@ -25,7 +25,7 @@ import config
 from bills import BillStore, current_month
 from contacts import days_until_birthday
 from inbox import convert_inbox_item_to_task
-from intents import guard_chat_answer
+from intents import REFUSAL_AUTHOR, guard_chat_answer
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -136,9 +136,11 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Ошибка LLM: {exc}") from exc
         # (1) Последняя линия защиты §(б): не отдаём наружу имитацию выполнения.
-        answer = guard_chat_answer(answer)
+        answer, guarded = guard_chat_answer(answer)
 
-        memory.log_message("я", text)
+        # §13: неудавшаяся попытка команды — не мысль пользователя, журналируем
+        # под REFUSAL_AUTHOR, чтобы suggestions её не кластеризовал (см. suggestions.py).
+        memory.log_message(REFUSAL_AUTHOR if guarded else "я", text)
         memory.log_message("бот", answer)
 
         history.append({"role": "user", "content": text})

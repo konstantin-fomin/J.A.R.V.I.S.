@@ -383,23 +383,40 @@ CHAT_GUARD_REFUSAL = (
     "Сделай это поддерживаемой командой или вручную."
 )
 
+# Автор для журнала (§13), которым помечается обмен-отказ/конфабуляция: пользователь
+# в такой реплике не делится мыслью, а пытается выполнить команду, которую бот не
+# распознал. suggestions.user_authored_text режет этого автора наравне с [бот].
+REFUSAL_AUTHOR = "отказ"
 
-def guard_chat_answer(answer: str) -> str:
+
+def guard_chat_answer(answer: str) -> tuple[str, bool]:
     """§(б), уровень (1): если ответ модели УТВЕРЖДАЕТ, что выполнил действие со
     стором (а на chat-пути доступа к сторам нет — значит это конфабуляция), заменяем
     его честным отказом. Детерминированно и независимо от того, сработал ли сигнал
     is_action_request (2): последняя линия защиты, не полагается на послушание LLM.
 
     Разбираем по предложениям: глагол совершённого действия считаем имитацией, только
-    если перед ним в этом же предложении нет второго лица («ты добавил» — про юзера)."""
+    если перед ним в этом же предложении нет второго лица («ты добавил» — про юзера).
+
+    Возвращает (текст, guarded) — guarded=True сигналит вызывающему коду, что обмен
+    не мысль пользователя, а неудавшаяся попытка действия (§13, см. is_chat_refusal)."""
     for sentence in re.split(r"(?<=[.!?])\s+", answer):
         m = _ACTION_CLAIM.search(sentence)
         if m is None:
             continue
         if _SECOND_PERSON.search(sentence[: m.start()]):
             continue  # действие приписано пользователю, а не боту
-        return CHAT_GUARD_REFUSAL
-    return answer
+        return CHAT_GUARD_REFUSAL, True
+    return answer, False
+
+
+def is_chat_refusal(answer: str, guarded: bool) -> bool:
+    """True — обмен считается отказом/конфабуляцией, не мыслью пользователя (§13).
+
+    guarded уже покрывает большинство случаев (guard_chat_answer заменил ответ на
+    CHAT_GUARD_REFUSAL); прямое сравнение текста — защита в глубину на случай, если
+    готовый шаблон отказа пришёл, минуя guard."""
+    return guarded or answer == CHAT_GUARD_REFUSAL
 
 
 def format_tasks(items: list[dict]) -> str:

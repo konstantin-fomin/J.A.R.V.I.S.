@@ -13,7 +13,14 @@ import config
 from bills import BillStore, current_month
 from bot.telegram_format import edit_html, reply_html
 from decisions import DecisionLogger
-from intents import IntentRouter, format_tasks, guard_chat_answer, parse_intent, route_after_resolve
+from intents import (
+    REFUSAL_AUTHOR,
+    IntentRouter,
+    format_tasks,
+    guard_chat_answer,
+    parse_intent,
+    route_after_resolve,
+)
 from llm.ollama_client import LLMClient
 from memory.facts import FactExtractor
 from memory.manager import MemoryManager
@@ -920,13 +927,15 @@ class Handlers:
             answer = await asyncio.to_thread(self.llm.chat, messages)
             # (1) Последняя линия защиты §(б): если модель всё же сымитировала
             # выполнение действия — заменяем честным отказом, не отправляем как есть.
-            answer = guard_chat_answer(answer)
+            answer, guarded = guard_chat_answer(answer)
         except Exception:
             logger.exception("Ошибка при обработке сообщения")
             await reply_html(update.message, "Что-то пошло не так 😔 Проверь настройки провайдера и попробуй ещё раз.")
             return
 
-        self.memory.log_message("я", text)
+        # §13: неудавшаяся попытка команды — не мысль пользователя, журналируем
+        # под REFUSAL_AUTHOR, чтобы suggestions её не кластеризовал (см. suggestions.py).
+        self.memory.log_message(REFUSAL_AUTHOR if guarded else "я", text)
         self.memory.log_message("бот", answer)
 
         history.append({"role": "user", "content": text})
