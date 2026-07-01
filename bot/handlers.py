@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -79,6 +79,18 @@ TASK_DONE_PREFIX = "task_done:"
 # Сколько позиций списка (задачи/платежи) рендерим кнопками — остаток только
 # упоминаем строкой «…и ещё N», чтобы клавиатура не расползалась на весь экран.
 MAX_LIST_ITEMS = 8
+
+# Подписи кнопок постоянной reply-клавиатуры (под полем ввода). Нажатие шлёт
+# этот же текст обычным сообщением — handle_text перехватывает его до
+# intent-парсинга и рендерит те же списки, что /bills, /inbox и NL query_tasks.
+BTN_TASKS = "📋 Задачи"
+BTN_BILLS = "💰 Платежи"
+BTN_INBOX = "📥 Инбокс"
+
+
+def main_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура-ярлык: вешается на ответ /start."""
+    return ReplyKeyboardMarkup([[BTN_TASKS, BTN_BILLS, BTN_INBOX]], resize_keyboard=True)
 
 # Префиксы callback_data кнопок Да/Нет под проактивной подсказкой (§13).
 # В data — theme_hash темы (40 hex-символов), по нему достаём формулировку из
@@ -214,7 +226,7 @@ class Handlers:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
             return
-        await reply_html(update.message, START_TEXT)
+        await reply_html(update.message, START_TEXT, reply_markup=main_reply_keyboard())
 
     async def plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -520,6 +532,24 @@ class Handlers:
             return
         text = update.message.text.strip()
 
+        # Пересланное сообщение — сразу в инбокс (source=forward), минуя
+        # intent-парсинг: сам факт форварда уже однозначный сигнал «сохрани».
+        if update.message.forward_origin is not None:
+            await self._capture_forward(update, text)
+            return
+
+        # Кнопки постоянной reply-клавиатуры — те же списки, что /bills,
+        # /inbox и NL query_tasks, без похода к LLM.
+        if text == BTN_TASKS:
+            await self._query_tasks(update, {"filter": None})
+            return
+        if text == BTN_BILLS:
+            await self._query_bills(update)
+            return
+        if text == BTN_INBOX:
+            await self.inbox_cmd(update, context)
+            return
+
         # Режим дневника: записать без ответа модели
         if text.startswith("📓"):
             entry = text.removeprefix("📓").strip()
@@ -528,6 +558,16 @@ class Handlers:
             return
 
         await self._process_text(update, context, text)
+
+    async def _capture_forward(self, update: Update, text: str) -> None:
+        """Пересланное сообщение → инбокс с source=forward, через обычный
+        capture path (IntentRouter.execute — capture уже в _LOGGED, значит
+        журналируется и отменяемо undo_last), но без гейта подтверждения:
+        форвард — это уже явное действие пользователя."""
+        reply = await asyncio.to_thread(
+            self.router.execute, {"type": "capture", "text": text, "capture_source": "forward"},
+        )
+        await reply_html(update.message, reply)
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Голосовое: скачать OGG → ffmpeg → WAV → Gemini-транскрипция → общий pipeline.

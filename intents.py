@@ -1639,7 +1639,10 @@ class IntentRouter:
         if kind == "capture":
             if self.inbox is None:
                 return "Инбокс не настроен 🤔", None, None, False
-            item = self.inbox.create(action["text"], source="telegram")
+            # capture_source — поле inbox-записи (откуда мысль пришла: telegram/forward),
+            # не путать с "source" на верхнем уровне action — тот execute() уже
+            # вынул под ActionLog.source (кто инициировал: telegram/suggestion/...).
+            item = self.inbox.create(action["text"], source=action.get("capture_source", "telegram"))
             return f"📥 Записал в инбокс: «{item['text']}»", str(item["id"]), item, True
         if kind == "reclassify_inbox":  # inbox_reclassify / реверс undo — смена статуса разбора
             assert self.inbox is not None
