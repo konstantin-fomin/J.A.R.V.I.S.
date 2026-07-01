@@ -26,6 +26,7 @@ from bot.handlers import (
     bills_markup,
     format_bills,
 )
+from bot.telegram_format import send_html
 from calendar_client import events_to_remind
 from contacts import ContactStore, days_until_birthday
 from intents import format_obligations
@@ -199,7 +200,7 @@ async def remind_events(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Не удалось собрать заметки к встрече — шлю без них")
             text = (f"🔔 Через {minutes} мин встреча: «{ev['title']}» "
                     f"в {ev['start'].strftime('%H:%M')}")
-        await context.bot.send_message(chat_id=chat_id, text=text)
+        await send_html(context.bot, chat_id, text)
 
 
 async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,9 +219,7 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not due:
         return
     text = format_bills(due, f"🔔 Завтра ({tomorrow.isoformat()}) платежи:")
-    await context.bot.send_message(
-        chat_id=chat_id, text=text, reply_markup=bills_markup(due)
-    )
+    await send_html(context.bot, chat_id, text, reply_markup=bills_markup(due))
 
 
 async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -241,7 +240,7 @@ async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         days = days_until_birthday(date.fromisoformat(c["birthday"]), today)
         when = "сегодня" if days == 0 else ("завтра" if days == 1 else f"через {days} дн")
         lines.append(f"• {c['name']} — {when}")
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    await send_html(context.bot, chat_id, "\n".join(lines))
 
 
 async def follow_up_obligations(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,7 +257,7 @@ async def follow_up_obligations(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not due:
         return
     text = format_obligations(due, "🔔 Напоминания по обязательствам:")
-    await context.bot.send_message(chat_id=chat_id, text=text)
+    await send_html(context.bot, chat_id, text)
 
 
 async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -285,9 +284,7 @@ async def reads_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
         label = head if len(head) <= 30 else head[:29] + "…"
         rows.append([InlineKeyboardButton(f"✓ Прочитано: {label}",
                                           callback_data=f"{READS_DONE_PREFIX}{r['id']}")])
-    await context.bot.send_message(
-        chat_id=chat_id, text="\n".join(lines), reply_markup=InlineKeyboardMarkup(rows)
-    )
+    await send_html(context.bot, chat_id, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def weekly_review(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -315,7 +312,7 @@ async def weekly_review(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         logger.exception("weekly review: LLM упал — шлю детерминированную сводку")
         text = format_review(stats)
-    await context.bot.send_message(chat_id=chat_id, text=text)
+    await send_html(context.bot, chat_id, text)
 
 
 async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -344,9 +341,7 @@ async def suggest_from_notes(context: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("❌ Нет", callback_data=f"{SUGGEST_DISMISS_PREFIX}{s['hash']}"),
         ]])
         try:
-            await context.bot.send_message(
-                chat_id=chat_id, text=build_suggestion_text(s["label"]), reply_markup=keyboard
-            )
+            await send_html(context.bot, chat_id, build_suggestion_text(s["label"]), reply_markup=keyboard)
         except Exception:
             logger.exception("Не удалось отправить подсказку «%s»", s["label"])
             continue
@@ -405,7 +400,7 @@ async def stale_contact_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         lcd = c.get("last_contact_date") or "неизвестно"
         lines.append(f"• {c['name']} — последний контакт: {lcd}")
         log.mark_suggested(theme_hash(f"stale:{c['id']}"), c["name"], when=today)
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    await send_html(context.bot, chat_id, "\n".join(lines))
 
 
 def build_application(

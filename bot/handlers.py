@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 import config
 from bills import BillStore, current_month
+from bot.telegram_format import edit_html, reply_html
 from decisions import DecisionLogger
 from intents import IntentRouter, guard_chat_answer, parse_intent, route_after_resolve
 from llm.ollama_client import LLMClient
@@ -21,8 +22,6 @@ from vision import VisionError, describe_photo
 from weekly_review import compose_summary, compute_week_stats, format_review
 
 logger = logging.getLogger(__name__)
-
-TELEGRAM_MAX_LEN = 4096
 
 START_TEXT = """Привет! Я твой личный ассистент с памятью.
 
@@ -54,17 +53,6 @@ PLAN_PROMPT = """Ты — личный ассистент. Составь пла
 🎯 Приоритеты на день — 1–3 главных пункта
 📋 Задачи — конкретные шаги
 💡 Советы — с учётом целей и контекста жизни пользователя"""
-
-
-def _split_message(text: str) -> list[str]:
-    """Telegram не принимает сообщения длиннее 4096 символов."""
-    if len(text) <= TELEGRAM_MAX_LEN:
-        return [text]
-    parts = []
-    while text:
-        parts.append(text[:TELEGRAM_MAX_LEN])
-        text = text[TELEGRAM_MAX_LEN:]
-    return parts
 
 
 def _allowed(update: Update) -> bool:
@@ -170,7 +158,7 @@ class Handlers:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
             return
-        await update.message.reply_text(START_TEXT)
+        await reply_html(update.message, START_TEXT)
 
     async def plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -187,40 +175,32 @@ class Handlers:
             )
         except Exception:
             logger.exception("Ошибка при составлении плана")
-            await update.message.reply_text(
-                "Не смог составить план 😔 Попробуй ещё раз."
-            )
+            await reply_html(update.message, "Не смог составить план 😔 Попробуй ещё раз.")
             return
-        for part in _split_message(answer):
-            await update.message.reply_text(part)
+        await reply_html(update.message, answer)
 
     async def show_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
             return
         files = self.memory.list_files()
         if not files:
-            await update.message.reply_text("Память пока пуста.")
+            await reply_html(update.message, "Память пока пуста.")
             return
         listing = "\n".join(f"• {f}" for f in files)
-        for part in _split_message(f"Файлы памяти:\n{listing}"):
-            await update.message.reply_text(part)
+        await reply_html(update.message, f"Файлы памяти:\n{listing}")
 
     async def forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
             return
         topic = " ".join(context.args) if context.args else ""
         if not topic:
-            await update.message.reply_text(
-                "Укажи тему: /forget работа\nСписок тем — в /memory"
-            )
+            await reply_html(update.message, "Укажи тему: /forget работа\nСписок тем — в /memory")
             return
         deleted = self.memory.forget(topic)
         if deleted:
-            await update.message.reply_text(f"Удалил {deleted} 🗑")
+            await reply_html(update.message, f"Удалил {deleted} 🗑")
         else:
-            await update.message.reply_text(
-                f"Не нашёл файл памяти «{topic}». Посмотри список в /memory"
-            )
+            await reply_html(update.message, f"Не нашёл файл памяти «{topic}». Посмотри список в /memory")
 
     async def bills_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -229,18 +209,14 @@ class Handlers:
         self.bills.ensure_month(ym)
         instances = self.bills.list_instances(ym)
         if not instances:
-            await update.message.reply_text(
-                "На этот месяц начислений нет. Шаблоны платежей заводятся на дашборде."
+            await reply_html(
+                update.message,
+                "На этот месяц начислений нет. Шаблоны платежей заводятся на дашборде.",
             )
             return
         text = format_bills(instances, f"💳 Платежи за {ym}:")
-        # Клавиатуру с кнопками «оплачено» вешаем на последнее сообщение
-        parts = _split_message(text)
-        markup = bills_markup(instances)
-        for i, part in enumerate(parts):
-            await update.message.reply_text(
-                part, reply_markup=markup if i == len(parts) - 1 else None
-            )
+        # Клавиатуру с кнопками «оплачено» вешаем на последнее сообщение (см. reply_html)
+        await reply_html(update.message, text, reply_markup=bills_markup(instances))
 
     async def mark_paid(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback кнопки «✅ Оплачено»: PATCH status=paid для instance_id."""
@@ -288,7 +264,7 @@ class Handlers:
         items = self.inbox.list() if self.inbox else []
         active = [it for it in items if it["status"] != "processed"]
         if not active:
-            await update.message.reply_text("Инбокс пуст 📥")
+            await reply_html(update.message, "Инбокс пуст 📥")
             return
         lines: list[str] = []
         rows = []
@@ -307,11 +283,7 @@ class Handlers:
                                           callback_data=f"{INBOX_TO_TASK_PREFIX}{it['id']}")]
                 )
         markup = InlineKeyboardMarkup(rows)
-        parts = _split_message("\n".join(lines))
-        for i, part in enumerate(parts):
-            await update.message.reply_text(
-                part, reply_markup=markup if i == len(parts) - 1 else None
-            )
+        await reply_html(update.message, "\n".join(lines), reply_markup=markup)
 
     async def inbox_to_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback «→ в задачу»: конвертирует inbox_item в задачу через обычный
@@ -373,7 +345,7 @@ class Handlers:
              "source": "suggestion"},
         )
         await query.answer("✅ В задачу")
-        await query.edit_message_text(f"✅ Создал задачу: «{label}»")
+        await edit_html(query, f"✅ Создал задачу: «{label}»")
 
     async def suggest_dismiss(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback «Нет» под проактивной подсказкой: ничего не создаём.
@@ -385,7 +357,7 @@ class Handlers:
             await query.answer()
             return
         await query.answer("Ок, не буду")
-        await query.edit_message_text("Ок, не превращаю в задачу 👌")
+        await edit_html(query, "Ок, не превращаю в задачу 👌")
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _allowed(update):
@@ -396,7 +368,7 @@ class Handlers:
         if text.startswith("📓"):
             entry = text.removeprefix("📓").strip()
             self.memory.log_message("дневник", entry)
-            await update.message.reply_text("Записал в дневник 📓")
+            await reply_html(update.message, "Записал в дневник 📓")
             return
 
         await self._process_text(update, context, text)
@@ -419,22 +391,16 @@ class Handlers:
             text = await asyncio.to_thread(transcribe_voice, ogg_bytes)
         except VoiceError:
             logger.exception("Не удалось обработать голосовое")
-            await update.message.reply_text(
-                "Не смог распознать голосовое 😔 Попробуй ещё раз или напиши текстом."
-            )
+            await reply_html(update.message, "Не смог распознать голосовое 😔 Попробуй ещё раз или напиши текстом.")
             return
         except Exception:
             logger.exception("Сбой при скачивании/обработке голосового")
-            await update.message.reply_text(
-                "Что-то пошло не так с голосовым 😔 Напиши, пожалуйста, текстом."
-            )
+            await reply_html(update.message, "Что-то пошло не так с голосовым 😔 Напиши, пожалуйста, текстом.")
             return
 
         # Транскрипция неуверенная/звук непонятен — честно просим повторить текстом
         if not text:
-            await update.message.reply_text(
-                "Не разобрал, что в голосовом 🎧 Повтори, пожалуйста, текстом."
-            )
+            await reply_html(update.message, "Не разобрал, что в голосовом 🎧 Повтори, пожалуйста, текстом.")
             return
 
         await self._process_text(update, context, text)
@@ -459,25 +425,18 @@ class Handlers:
             answer = await asyncio.to_thread(describe_photo, image_bytes, caption)
         except VisionError:
             logger.exception("Не удалось обработать фото")
-            await update.message.reply_text(
-                "Не смог разобрать фото 😔 Попробуй ещё раз или опиши текстом."
-            )
+            await reply_html(update.message, "Не смог разобрать фото 😔 Попробуй ещё раз или опиши текстом.")
             return
         except Exception:
             logger.exception("Сбой при скачивании/обработке фото")
-            await update.message.reply_text(
-                "Что-то пошло не так с фото 😔 Напиши, пожалуйста, текстом."
-            )
+            await reply_html(update.message, "Что-то пошло не так с фото 😔 Напиши, пожалуйста, текстом.")
             return
 
         if not answer:
-            await update.message.reply_text(
-                "Не понял, что на фото 🖼 Попробуй другое фото или опиши текстом."
-            )
+            await reply_html(update.message, "Не понял, что на фото 🖼 Попробуй другое фото или опиши текстом.")
             return
 
-        for part in _split_message(answer):
-            await update.message.reply_text(part)
+        await reply_html(update.message, answer)
 
     async def _process_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         """Общий путь для текста и расшифрованного голоса: намерение → действие/чат."""
@@ -502,9 +461,10 @@ class Handlers:
         if route == "refuse":
             # Модель пыталась выдать команду, которой нет (§3/§(б)). Честный отказ
             # вместо chat-пайплайна — иначе он сконфабулирует «сделал».
-            await update.message.reply_text(
+            await reply_html(
+                update.message,
                 "Не понял, что нужно сделать — такой команды я пока не умею. "
-                "Можешь переформулировать или сделать это вручную/одной поддерживаемой командой."
+                "Можешь переформулировать или сделать это вручную/одной поддерживаемой командой.",
             )
             return
 
@@ -513,7 +473,7 @@ class Handlers:
 
     async def _handle_resolution(self, update, context, resolution) -> None:
         if resolution.kind == "message":
-            await update.message.reply_text(resolution.text)
+            await reply_html(update.message, resolution.text)
             return
         if resolution.kind == "execute":
             if resolution.action["type"] == "save_link":
@@ -526,8 +486,7 @@ class Handlers:
                 await self._decision(update, resolution.action)
                 return
             reply = await asyncio.to_thread(self.router.execute, resolution.action)
-            for part in _split_message(reply):
-                await update.message.reply_text(part)
+            await reply_html(update.message, reply)
             return
         if resolution.kind == "confirm":
             context.chat_data["pending_action"] = resolution.action
@@ -539,7 +498,7 @@ class Handlers:
                     ]
                 ]
             )
-            await update.message.reply_text(f"Уточню: {resolution.label}", reply_markup=keyboard)
+            await reply_html(update.message, f"Уточню: {resolution.label}", reply_markup=keyboard)
 
     async def _save_link(self, update: Update, action: dict) -> None:
         """save_link: качаем страницу + саммари (сеть+LLM, поэтому в to_thread),
@@ -550,8 +509,7 @@ class Handlers:
         info = await asyncio.to_thread(enrich_link, self.llm, url)
         action["params"].update(title=info["title"], summary=info["summary"])
         reply = await asyncio.to_thread(self.router.execute, action)
-        for part in _split_message(reply):
-            await update.message.reply_text(part)
+        await reply_html(update.message, reply)
 
     async def _decision(self, update: Update, action: dict) -> None:
         """Журнал решений (§19.3): извлечение+запись (log_decision) или поиск
@@ -563,8 +521,7 @@ class Handlers:
             reply = await asyncio.to_thread(self.decisions.log_decision, text)
         else:
             reply = await asyncio.to_thread(self.decisions.query_decisions, text)
-        for part in _split_message(reply):
-            await update.message.reply_text(part)
+        await reply_html(update.message, reply)
 
     async def _weekly_review(self, update: Update) -> None:
         """query_weekly_review: цифры считает compute_week_stats (чистый Python над
@@ -583,8 +540,7 @@ class Handlers:
         except Exception:
             logger.exception("weekly review: LLM упал — шлю детерминированную сводку")
             text = format_review(stats)
-        for part in _split_message(text):
-            await update.message.reply_text(part)
+        await reply_html(update.message, text)
 
     async def read_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback «✓ Прочитано» в дайджесте: отмечает ссылку прочитанной штатным
@@ -631,11 +587,11 @@ class Handlers:
             return
         if query.data == INTENT_NO:
             await query.answer("Отменено")
-            await query.edit_message_text("Отменено ❌")
+            await edit_html(query, "Отменено ❌")
             return
         await query.answer()
         reply = await asyncio.to_thread(self.router.execute, action)
-        await query.edit_message_text(reply[:TELEGRAM_MAX_LEN])
+        await edit_html(query, reply)
 
     async def _chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         history: list[dict] = context.chat_data.setdefault("history", [])
@@ -658,9 +614,7 @@ class Handlers:
             answer = guard_chat_answer(answer)
         except Exception:
             logger.exception("Ошибка при обработке сообщения")
-            await update.message.reply_text(
-                "Что-то пошло не так 😔 Проверь настройки провайдера и попробуй ещё раз."
-            )
+            await reply_html(update.message, "Что-то пошло не так 😔 Проверь настройки провайдера и попробуй ещё раз.")
             return
 
         self.memory.log_message("я", text)
@@ -675,5 +629,4 @@ class Handlers:
             asyncio.to_thread(self.facts.extract_and_save, text, answer)
         )
 
-        for part in _split_message(answer):
-            await update.message.reply_text(part)
+        await reply_html(update.message, answer)
