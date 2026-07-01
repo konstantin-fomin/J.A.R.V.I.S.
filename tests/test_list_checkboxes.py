@@ -9,6 +9,8 @@
 пометка «…и ещё N». Сеть/LLM не дёргаем.
 """
 import asyncio
+import sqlite3
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +27,15 @@ from bot.handlers import (
 from inbox import InboxStore
 from logger import ActionLog
 from tasks import TaskStore
+
+
+def _set(db_path, table, column, value, row_id):
+    """Напрямую правит поле в SQLite — для детерминированного backdating
+    updated_at в тестах (тот же паттерн, что в test_weekly_review.py)."""
+    con = sqlite3.connect(db_path)
+    con.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (value, row_id))
+    con.commit()
+    con.close()
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +72,14 @@ def test_tasks_markup_has_button_per_open_task():
     assert markup is not None
     callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert callbacks == [f"{TASK_DONE_PREFIX}1", f"{TASK_DONE_PREFIX}2"]
+
+
+def test_tasks_markup_button_text_includes_task_title():
+    """Регрессия: кнопка не должна быть голой галочкой без подписи."""
+    items = [_task(1, "купить молоко")]
+    markup = tasks_markup(items)
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    assert texts == ["☑️ купить молоко"]
 
 
 def test_tasks_markup_skips_done_and_cancelled():
@@ -149,6 +168,43 @@ def test_query_tasks_empty_has_no_markup(tmp_path):
     call = message.calls[0]
     assert "Задач нет" in call["text"]
     assert "reply_markup" not in call or call.get("reply_markup") is None
+
+
+# --- _query_tasks: done-задачи без даты видны только в день выполнения ---------
+# Та же логика, что на дашборде (dashboard/index.html loadTasks): done-задача
+# остаётся в списке, только если updated_at == сегодня — иначе старые
+# тестовые/архивные done-задачи копятся в списке навсегда.
+
+def test_query_tasks_hides_done_task_not_updated_today(tmp_path):
+    h, tasks, *_ = _handlers(tmp_path)
+    fresh = tasks.create("сделано сегодня")
+    tasks.update(fresh["id"], status="done")
+    stale = tasks.create("сделано давно")
+    tasks.update(stale["id"], status="done")
+    _set(tmp_path / "t.db", "tasks", "updated_at", "2020-01-01T09:00:00+00:00", stale["id"])
+    tasks.create("ещё не сделано")
+
+    message = FakeMessage()
+    asyncio.run(h._query_tasks(FakeUpdate(message), {"filter": None}))
+    text = message.calls[0]["text"]
+    assert "сделано сегодня" in text
+    assert "сделано давно" not in text
+    assert "ещё не сделано" in text
+
+
+def test_query_tasks_hides_stale_done_task_even_with_due_date(tmp_path):
+    """Правило применяется ко всем done-задачам, а не только без due_date —
+    как и в дашборде: due_date у done-задачи игнорируется, важен updated_at."""
+    h, tasks, *_ = _handlers(tmp_path)
+    today = date.today().isoformat()
+    stale = tasks.create("оплачено давно", due_date=today)
+    tasks.update(stale["id"], status="done")
+    _set(tmp_path / "t.db", "tasks", "updated_at", "2020-01-01T09:00:00+00:00", stale["id"])
+
+    message = FakeMessage()
+    asyncio.run(h._query_tasks(FakeUpdate(message), {"filter": None}))
+    text = message.calls[0]["text"]
+    assert "оплачено давно" not in text
 
 
 def test_query_bills_shows_checkbox_for_pending(tmp_path):

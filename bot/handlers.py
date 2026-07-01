@@ -142,11 +142,19 @@ def cap_list(items: list) -> tuple[list, int]:
 def tasks_markup(items: list[dict]) -> InlineKeyboardMarkup | None:
     """По кнопке-чекбоксу на каждую ещё не выполненную/отменённую задачу."""
     rows = [
-        [InlineKeyboardButton("☑️", callback_data=f"{TASK_DONE_PREFIX}{t['id']}")]
+        [InlineKeyboardButton(f"☑️ {t['title']}", callback_data=f"{TASK_DONE_PREFIX}{t['id']}")]
         for t in items
         if t["status"] not in ("done", "cancelled")
     ]
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _visible_tasks(items: list[dict], today: str) -> list[dict]:
+    """Done-задача остаётся в списке только в день, когда её отметили — та же
+    логика, что на дашборде (dashboard/index.html loadTasks: сравнение
+    updated_at с today), иначе старые done-задачи копятся и захламляют список.
+    due_date у done-задачи не важен, как и там."""
+    return [t for t in items if t["status"] != "done" or (t["updated_at"] or "")[:10] == today]
 
 
 def format_bills(instances: list[dict], header: str) -> str:
@@ -321,10 +329,12 @@ class Handlers:
         """Рендер списка задач с чекбоксами: общий путь для /tasks-подобных
         NL-запросов (query_tasks) — список капается на MAX_LIST_ITEMS, под
         каждой показанной незакрытой задачей кнопка mark_task_done."""
+        today = date.today().isoformat()
         if action.get("filter") == "today":
-            items = self.tasks.list(due_date=date.today().isoformat())
+            items = self.tasks.list(due_date=today)
         else:
             items = self.tasks.list()
+        items = _visible_tasks(items, today)
         if not items:
             await reply_html(update.message, format_tasks(items))
             return
