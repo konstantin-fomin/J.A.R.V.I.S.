@@ -164,17 +164,21 @@ def render_actionable_list(
     text_line: Callable[[dict], str],
     short_action: str,
     callback_data: Callable[[dict], str],
-) -> tuple[list[str], InlineKeyboardMarkup | None]:
+) -> tuple[list[str], InlineKeyboardMarkup | None, list[tuple[str, InlineKeyboardMarkup]]]:
     """Общий рендер списка с чекбоксами (инбокс/задачи/платежи): НИКОГДА не
     обрезаем текст записи многоточием. Если полная подпись кнопки (button_label)
     умещается в лимит Telegram (BUTTON_TEXT_LIMIT) — запись показываем ТОЛЬКО
-    кнопкой с этой подписью, без дублирования текстом. Если не умещается —
-    текст идёт отдельной строкой целиком (text_line), а рядом — компактная
-    кнопка-действие (short_action) без повтора содержимого. Неактивные записи
-    (is_actionable=False — уже выполнено/оплачено/…) кнопки не получают вообще,
-    всегда только текстом."""
+    кнопкой с этой подписью, без дублирования текстом, в общем списке. Если не
+    умещается — запись НЕ попадает в общий список вообще: она уходит в
+    long_messages отдельной парой (полный текст без обрезки, кнопка-действие).
+    Так кнопка физически привязана к своей записи через принадлежность одному
+    Telegram-сообщению — вызывающий код должен отправить каждую пару из
+    long_messages отдельным сообщением, а не полагаться на порядок/соседство в
+    общем списке. Неактивные записи (is_actionable=False — уже выполнено/
+    оплачено/…) кнопки не получают вообще, всегда только текстом в общем списке."""
     lines: list[str] = []
     rows: list[list[InlineKeyboardButton]] = []
+    long_messages: list[tuple[str, InlineKeyboardMarkup]] = []
     for it in items:
         if not is_actionable(it):
             lines.append(text_line(it))
@@ -184,10 +188,10 @@ def render_actionable_list(
         if len(label) <= BUTTON_TEXT_LIMIT:
             rows.append([InlineKeyboardButton(label, callback_data=cb)])
         else:
-            lines.append(text_line(it))
-            rows.append([InlineKeyboardButton(short_action, callback_data=cb)])
+            standalone_markup = InlineKeyboardMarkup([[InlineKeyboardButton(short_action, callback_data=cb)]])
+            long_messages.append((text_line(it), standalone_markup))
     markup = InlineKeyboardMarkup(rows) if rows else None
-    return lines, markup
+    return lines, markup, long_messages
 
 
 def _visible_tasks(items: list[dict], today: str) -> list[dict]:
@@ -220,7 +224,7 @@ def _task_button_label(t: dict) -> str:
 def tasks_markup(items: list[dict]) -> InlineKeyboardMarkup | None:
     """Клавиатура чекбоксов для списка задач (используется и напрямую в тестах,
     и как «текущая клавиатура» для восстановления перед снятием кнопки)."""
-    _, markup = render_actionable_list(
+    _, markup, _ = render_actionable_list(
         items,
         is_actionable=lambda t: t["status"] not in ("done", "cancelled"),
         button_label=_task_button_label,
@@ -252,11 +256,15 @@ def format_bills(instances: list[dict], header: str) -> str:
     return "\n".join(lines)
 
 
-def render_bills(instances: list[dict], header: str) -> tuple[str, InlineKeyboardMarkup | None]:
+def render_bills(
+    instances: list[dict], header: str
+) -> tuple[str, InlineKeyboardMarkup | None, list[tuple[str, InlineKeyboardMarkup]]]:
     """Общий рендер платежей (для /bills и напоминания «завтра платежи») —
-    см. render_actionable_list: полный текст никогда не обрезаем."""
+    см. render_actionable_list: полный текст никогда не обрезаем, длинные записи
+    возвращаются отдельно (long_messages) — вызывающий код шлёт их отдельными
+    сообщениями вслед за основным списком."""
     shown, extra = cap_list(instances)
-    lines, markup = render_actionable_list(
+    lines, markup, long_messages = render_actionable_list(
         shown,
         is_actionable=lambda b: b["status"] != "paid",
         button_label=_bill_button_label,
@@ -267,7 +275,7 @@ def render_bills(instances: list[dict], header: str) -> tuple[str, InlineKeyboar
     text = header + ("\n\n" + "\n".join(lines) if lines else "")
     if extra:
         text += f"\n…и ещё {extra}"
-    return text, markup
+    return text, markup, long_messages
 
 
 def _markup_without(
@@ -427,7 +435,7 @@ class Handlers:
             await reply_html(update.message, format_tasks(items))
             return
         shown, extra = cap_list(items)
-        lines, markup = render_actionable_list(
+        lines, markup, long_messages = render_actionable_list(
             shown,
             is_actionable=lambda t: t["status"] not in ("done", "cancelled"),
             button_label=_task_button_label,
@@ -439,6 +447,8 @@ class Handlers:
         if extra:
             text += f"\n…и ещё {extra}"
         await reply_html(update.message, text, reply_markup=markup)
+        for msg_text, msg_markup in long_messages:
+            await reply_html(update.message, msg_text, reply_markup=msg_markup)
 
     async def _query_bills(self, update: Update) -> None:
         """Рендер платежей текущего месяца с чекбоксами «оплачено» — общий путь
@@ -452,9 +462,11 @@ class Handlers:
                 "На этот месяц начислений нет. Шаблоны платежей заводятся на дашборде.",
             )
             return
-        text, markup = render_bills(instances, f"💳 Платежи за {ym}:")
+        text, markup, long_messages = render_bills(instances, f"💳 Платежи за {ym}:")
         # Клавиатуру с кнопками «оплачено» вешаем на последнее сообщение (см. reply_html)
         await reply_html(update.message, text, reply_markup=markup)
+        for msg_text, msg_markup in long_messages:
+            await reply_html(update.message, msg_text, reply_markup=msg_markup)
 
     async def mark_task_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback чекбокса задачи: как mark_paid/inbox_to_task — но само
@@ -546,6 +558,7 @@ class Handlers:
             return
         lines: list[str] = []
         rows: list[list[InlineKeyboardButton]] = []
+        long_messages: list[tuple[str, InlineKeyboardMarkup]] = []
         for status, header in self._INBOX_GROUPS:
             group = [it for it in active if it["status"] == status]
             if not group:
@@ -553,7 +566,7 @@ class Handlers:
             if lines:
                 lines.append("")
             lines.append(header)
-            group_lines, group_markup = render_actionable_list(
+            group_lines, group_markup, group_long_messages = render_actionable_list(
                 group,
                 is_actionable=lambda it: True,
                 button_label=lambda it: f"→ {it['text']}",
@@ -564,8 +577,11 @@ class Handlers:
             lines.extend(group_lines)
             if group_markup:
                 rows.extend(group_markup.inline_keyboard)
+            long_messages.extend(group_long_messages)
         markup = InlineKeyboardMarkup(rows) if rows else None
         await reply_html(update.message, "\n".join(lines), reply_markup=markup)
+        for msg_text, msg_markup in long_messages:
+            await reply_html(update.message, msg_text, reply_markup=msg_markup)
 
     async def inbox_to_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback «→ в задачу»: конвертирует inbox_item в задачу через обычный

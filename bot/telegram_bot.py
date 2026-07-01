@@ -237,8 +237,10 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     due = bills.due_on(tomorrow.isoformat(), status="pending")
     if not due:
         return
-    text, markup = render_bills(due, f"🔔 Завтра ({tomorrow.isoformat()}) платежи:")
+    text, markup, long_messages = render_bills(due, f"🔔 Завтра ({tomorrow.isoformat()}) платежи:")
     await send_html(context.bot, chat_id, text, reply_markup=markup)
+    for msg_text, msg_markup in long_messages:
+        await send_html(context.bot, chat_id, msg_text, reply_markup=msg_markup)
 
 
 async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
