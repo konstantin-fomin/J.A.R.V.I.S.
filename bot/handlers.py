@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
@@ -73,6 +74,10 @@ INTENT_NO = "intent_no"
 # Префикс callback_data кнопки «→ в задачу» в /inbox: "inbox2task:<item_id>"
 INBOX_TO_TASK_PREFIX = "inbox2task:"
 
+# Компактная кнопка для инбокс-записи, чей полный текст не влезает в лимит
+# Telegram (см. render_actionable_list) — полный текст тогда идёт строкой.
+INBOX_SHORT_ACTION = "→ задача"
+
 # Префикс callback_data кнопки чекбокса задачи в /tasks-списках: "task_done:<task_id>"
 TASK_DONE_PREFIX = "task_done:"
 
@@ -139,14 +144,43 @@ def cap_list(items: list) -> tuple[list, int]:
     return items[:MAX_LIST_ITEMS], len(items) - MAX_LIST_ITEMS
 
 
-def tasks_markup(items: list[dict]) -> InlineKeyboardMarkup | None:
-    """По кнопке-чекбоксу на каждую ещё не выполненную/отменённую задачу."""
-    rows = [
-        [InlineKeyboardButton(f"☑️ {t['title']}", callback_data=f"{TASK_DONE_PREFIX}{t['id']}")]
-        for t in items
-        if t["status"] not in ("done", "cancelled")
-    ]
-    return InlineKeyboardMarkup(rows) if rows else None
+# Telegram Bot API: text кнопки InlineKeyboardButton — 1-64 символа. Дольше —
+# клиент обрежет/не примет, поэтому это порог «влезает целиком vs нет».
+BUTTON_TEXT_LIMIT = 64
+
+
+def render_actionable_list(
+    items: list[dict],
+    *,
+    is_actionable: Callable[[dict], bool],
+    button_label: Callable[[dict], str],
+    text_line: Callable[[dict], str],
+    short_action: str,
+    callback_data: Callable[[dict], str],
+) -> tuple[list[str], InlineKeyboardMarkup | None]:
+    """Общий рендер списка с чекбоксами (инбокс/задачи/платежи): НИКОГДА не
+    обрезаем текст записи многоточием. Если полная подпись кнопки (button_label)
+    умещается в лимит Telegram (BUTTON_TEXT_LIMIT) — запись показываем ТОЛЬКО
+    кнопкой с этой подписью, без дублирования текстом. Если не умещается —
+    текст идёт отдельной строкой целиком (text_line), а рядом — компактная
+    кнопка-действие (short_action) без повтора содержимого. Неактивные записи
+    (is_actionable=False — уже выполнено/оплачено/…) кнопки не получают вообще,
+    всегда только текстом."""
+    lines: list[str] = []
+    rows: list[list[InlineKeyboardButton]] = []
+    for it in items:
+        if not is_actionable(it):
+            lines.append(text_line(it))
+            continue
+        label = button_label(it)
+        cb = callback_data(it)
+        if len(label) <= BUTTON_TEXT_LIMIT:
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        else:
+            lines.append(text_line(it))
+            rows.append([InlineKeyboardButton(short_action, callback_data=cb)])
+    markup = InlineKeyboardMarkup(rows) if rows else None
+    return lines, markup
 
 
 def _visible_tasks(items: list[dict], today: str) -> list[dict]:
@@ -157,29 +191,76 @@ def _visible_tasks(items: list[dict], today: str) -> list[dict]:
     return [t for t in items if t["status"] != "done" or (t["updated_at"] or "")[:10] == today]
 
 
+TASK_SHORT_ACTION = "✅ отметить"
+
+
+def _task_due_suffix(t: dict) -> str:
+    due = ""
+    if t["due_date"]:
+        due = f" — {t['due_date']}" + (f" {t['due_time']}" if t["due_time"] else "")
+    return due + (" ‼️" if t["priority"] == "high" else "")
+
+
+def _task_line(t: dict) -> str:
+    mark = {"done": "✅", "cancelled": "✖️"}.get(t["status"], "⏳")
+    return f"{mark} {t['title']}{_task_due_suffix(t)}"
+
+
+def _task_button_label(t: dict) -> str:
+    return f"☑️ {t['title']}{_task_due_suffix(t)}"
+
+
+def tasks_markup(items: list[dict]) -> InlineKeyboardMarkup | None:
+    """Клавиатура чекбоксов для списка задач (используется и напрямую в тестах,
+    и как «текущая клавиатура» для восстановления перед снятием кнопки)."""
+    _, markup = render_actionable_list(
+        items,
+        is_actionable=lambda t: t["status"] not in ("done", "cancelled"),
+        button_label=_task_button_label,
+        text_line=_task_line,
+        short_action=TASK_SHORT_ACTION,
+        callback_data=lambda t: f"{TASK_DONE_PREFIX}{t['id']}",
+    )
+    return markup
+
+
+BILL_SHORT_ACTION = "✅ отметить"
+
+
+def _bill_line(b: dict) -> str:
+    mark = "✅" if b["status"] == "paid" else "⏳"
+    amount = f" — {b['amount']:.0f}" if b["amount"] is not None else ""
+    return f"{mark} {b['due_date']}  {b['name']}{amount}"
+
+
+def _bill_button_label(b: dict) -> str:
+    return f"✅ Оплачено · {b['name']}"
+
+
 def format_bills(instances: list[dict], header: str) -> str:
-    """Список начислений со статусами — для /bills и напоминаний."""
-    lines = [header, ""]
-    for b in instances:
-        mark = "✅" if b["status"] == "paid" else "⏳"
-        amount = f" — {b['amount']:.0f}" if b["amount"] is not None else ""
-        lines.append(f"{mark} {b['due_date']}  {b['name']}{amount}")
+    """Список начислений со статусами, без кнопок — используется только вне
+    Telegram-бота (сейчас нет ни одного живого вызова: код в intents.py
+    оставлен на случай прямого вызова IntentRouter.execute вне handlers)."""
+    lines = [header, ""] + [_bill_line(b) for b in instances]
     return "\n".join(lines)
 
 
-def bills_markup(instances: list[dict]) -> InlineKeyboardMarkup | None:
-    """По кнопке «✅ Оплачено» на каждый ещё не оплаченный платёж."""
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"✅ Оплачено · {b['name']}",
-                callback_data=f"{BILL_PAID_PREFIX}{b['id']}",
-            )
-        ]
-        for b in instances
-        if b["status"] != "paid"
-    ]
-    return InlineKeyboardMarkup(rows) if rows else None
+def render_bills(instances: list[dict], header: str) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Общий рендер платежей (для /bills и напоминания «завтра платежи») —
+    см. render_actionable_list: полный текст никогда не обрезаем."""
+    shown, extra = cap_list(instances)
+    lines, markup = render_actionable_list(
+        shown,
+        is_actionable=lambda b: b["status"] != "paid",
+        button_label=_bill_button_label,
+        text_line=_bill_line,
+        short_action=BILL_SHORT_ACTION,
+        callback_data=lambda b: f"{BILL_PAID_PREFIX}{b['id']}",
+    )
+    text = header + ("\n\n" + "\n".join(lines) if lines else "")
+    if extra:
+        text += f"\n…и ещё {extra}"
+    return text, markup
 
 
 def _markup_without(
@@ -339,10 +420,18 @@ class Handlers:
             await reply_html(update.message, format_tasks(items))
             return
         shown, extra = cap_list(items)
-        text = format_tasks(shown)
+        lines, markup = render_actionable_list(
+            shown,
+            is_actionable=lambda t: t["status"] not in ("done", "cancelled"),
+            button_label=_task_button_label,
+            text_line=_task_line,
+            short_action=TASK_SHORT_ACTION,
+            callback_data=lambda t: f"{TASK_DONE_PREFIX}{t['id']}",
+        )
+        text = "📋 Задачи:" + ("\n\n" + "\n".join(lines) if lines else "")
         if extra:
             text += f"\n…и ещё {extra}"
-        await reply_html(update.message, text, reply_markup=tasks_markup(shown))
+        await reply_html(update.message, text, reply_markup=markup)
 
     async def _query_bills(self, update: Update) -> None:
         """Рендер платежей текущего месяца с чекбоксами «оплачено» — общий путь
@@ -356,12 +445,9 @@ class Handlers:
                 "На этот месяц начислений нет. Шаблоны платежей заводятся на дашборде.",
             )
             return
-        shown, extra = cap_list(instances)
-        text = format_bills(shown, f"💳 Платежи за {ym}:")
-        if extra:
-            text += f"\n…и ещё {extra}"
+        text, markup = render_bills(instances, f"💳 Платежи за {ym}:")
         # Клавиатуру с кнопками «оплачено» вешаем на последнее сообщение (см. reply_html)
-        await reply_html(update.message, text, reply_markup=bills_markup(shown))
+        await reply_html(update.message, text, reply_markup=markup)
 
     async def mark_task_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Callback чекбокса задачи: как mark_paid/inbox_to_task — но само
@@ -445,7 +531,7 @@ class Handlers:
             await reply_html(update.message, "Инбокс пуст 📥")
             return
         lines: list[str] = []
-        rows = []
+        rows: list[list[InlineKeyboardButton]] = []
         for status, header in self._INBOX_GROUPS:
             group = [it for it in active if it["status"] == status]
             if not group:
@@ -453,14 +539,18 @@ class Handlers:
             if lines:
                 lines.append("")
             lines.append(header)
-            for it in group:
-                lines.append(f"• {it['text']}")
-                label = it["text"] if len(it["text"]) <= 30 else it["text"][:29] + "…"
-                rows.append(
-                    [InlineKeyboardButton(f"→ в задачу: {label}",
-                                          callback_data=f"{INBOX_TO_TASK_PREFIX}{it['id']}")]
-                )
-        markup = InlineKeyboardMarkup(rows)
+            group_lines, group_markup = render_actionable_list(
+                group,
+                is_actionable=lambda it: True,
+                button_label=lambda it: f"→ в задачу: {it['text']}",
+                text_line=lambda it: f"• {it['text']}",
+                short_action=INBOX_SHORT_ACTION,
+                callback_data=lambda it: f"{INBOX_TO_TASK_PREFIX}{it['id']}",
+            )
+            lines.extend(group_lines)
+            if group_markup:
+                rows.extend(group_markup.inline_keyboard)
+        markup = InlineKeyboardMarkup(rows) if rows else None
         await reply_html(update.message, "\n".join(lines), reply_markup=markup)
 
     async def inbox_to_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

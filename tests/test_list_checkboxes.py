@@ -145,9 +145,12 @@ def test_query_tasks_shows_checkbox_for_each_open_task(tmp_path):
     message = FakeMessage()
     asyncio.run(h._query_tasks(FakeUpdate(message), {"filter": None}))
     call = message.calls[0]
-    assert "купить молоко" in call["text"]
     markup = call["reply_markup"]
-    assert len([b for row in markup.inline_keyboard for b in row]) == 2
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    # короткие названия помещаются в кнопку целиком — без дублирования текстом
+    # (см. tests/test_full_text_buttons.py)
+    assert any("купить молоко" in label for label in labels)
+    assert len(labels) == 2
 
 
 def test_query_tasks_caps_list_and_notes_extra(tmp_path):
@@ -186,10 +189,14 @@ def test_query_tasks_hides_done_task_not_updated_today(tmp_path):
 
     message = FakeMessage()
     asyncio.run(h._query_tasks(FakeUpdate(message), {"filter": None}))
-    text = message.calls[0]["text"]
-    assert "сделано сегодня" in text
+    call = message.calls[0]
+    text = call["text"]
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert "сделано сегодня" in text  # done — всегда текстом (не actionable)
     assert "сделано давно" not in text
-    assert "ещё не сделано" in text
+    assert not any("сделано давно" in label for label in labels)
+    # "ещё не сделано" — короткая активная задача, помещается в кнопку целиком
+    assert any("ещё не сделано" in label for label in labels)
 
 
 def test_query_tasks_hides_stale_done_task_even_with_due_date(tmp_path):
@@ -213,8 +220,10 @@ def test_query_bills_shows_checkbox_for_pending(tmp_path):
     message = FakeMessage()
     asyncio.run(h._query_bills(FakeUpdate(message)))
     call = message.calls[0]
-    assert "Аренда" in call["text"]
     assert call["reply_markup"] is not None
+    # короткое название помещается в кнопку целиком, без дублирования текстом
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert any("Аренда" in label for label in labels)
 
 
 def test_query_bills_caps_list_and_notes_extra(tmp_path):
@@ -233,8 +242,10 @@ def test_bills_cmd_reuses_query_bills_rendering(tmp_path):
     bills.create_template("Аренда", day_of_month=5, amount=100)
     message = FakeMessage()
     asyncio.run(h.bills_cmd(FakeUpdate(message), context=None))
-    assert "Аренда" in message.calls[0]["text"]
-    assert message.calls[0]["reply_markup"] is not None
+    call = message.calls[0]
+    assert call["reply_markup"] is not None
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert any("Аренда" in label for label in labels)
 
 
 # --- mark_task_done: паттерн callback как у mark_paid/inbox_to_task ------------

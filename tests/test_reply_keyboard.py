@@ -92,8 +92,11 @@ def test_tasks_button_shows_task_list(tmp_path):
     tasks.create("купить молоко")
     message = FakeMessage(BTN_TASKS)
     asyncio.run(h.handle_text(FakeUpdate(message), context=None))
-    assert "купить молоко" in message.calls[0]["text"]
-    assert message.calls[0]["reply_markup"] is not None
+    call = message.calls[0]
+    assert call["reply_markup"] is not None
+    # короткое название помещается в кнопку целиком, без дублирования текстом
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert any("купить молоко" in label for label in labels)
 
 
 def test_bills_button_shows_bills_list(tmp_path):
@@ -101,7 +104,9 @@ def test_bills_button_shows_bills_list(tmp_path):
     bills.create_template("Аренда", day_of_month=5, amount=100)
     message = FakeMessage(BTN_BILLS)
     asyncio.run(h.handle_text(FakeUpdate(message), context=None))
-    assert "Аренда" in message.calls[0]["text"]
+    call = message.calls[0]
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert any("Аренда" in label for label in labels)
 
 
 def test_inbox_button_shows_inbox_list(tmp_path):
@@ -109,7 +114,9 @@ def test_inbox_button_shows_inbox_list(tmp_path):
     inbox.create("мысль про отпуск")
     message = FakeMessage(BTN_INBOX)
     asyncio.run(h.handle_text(FakeUpdate(message), context=None))
-    assert "мысль про отпуск" in message.calls[0]["text"]
+    call = message.calls[0]
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert any("мысль про отпуск" in label for label in labels)
 
 
 def test_button_labels_never_reach_llm_or_diary(tmp_path):

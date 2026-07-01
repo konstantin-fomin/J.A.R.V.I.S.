@@ -24,8 +24,7 @@ from bot.handlers import (
     SUGGEST_TASK_PREFIX,
     TASK_DONE_PREFIX,
     Handlers,
-    bills_markup,
-    format_bills,
+    render_bills,
 )
 from bot.telegram_format import send_html
 from calendar_client import events_to_remind
@@ -238,8 +237,8 @@ async def remind_bills(context: ContextTypes.DEFAULT_TYPE) -> None:
     due = bills.due_on(tomorrow.isoformat(), status="pending")
     if not due:
         return
-    text = format_bills(due, f"🔔 Завтра ({tomorrow.isoformat()}) платежи:")
-    await send_html(context.bot, chat_id, text, reply_markup=bills_markup(due))
+    text, markup = render_bills(due, f"🔔 Завтра ({tomorrow.isoformat()}) платежи:")
+    await send_html(context.bot, chat_id, text, reply_markup=markup)
 
 
 async def birthday_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
