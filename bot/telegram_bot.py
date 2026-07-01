@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,6 +22,7 @@ from bot.handlers import (
     READS_DONE_PREFIX,
     SUGGEST_DISMISS_PREFIX,
     SUGGEST_TASK_PREFIX,
+    TASK_DONE_PREFIX,
     Handlers,
     bills_markup,
     format_bills,
@@ -72,6 +73,25 @@ RECURRING_KEEP_DAYS = 30
 
 # Максимальная длина короткого фрагмента заметки в pre-meeting bundle.
 PREMEETING_SNIPPET_MAX = 120
+
+# Меню команд Telegram (кнопка «/» в клиенте): публикуется через setMyCommands
+# при старте (post_init), а не вручную через @BotFather — список должен один-в-один
+# совпадать с CommandHandler, зарегистрированными в build_application (см. тест
+# test_bot_commands_menu.py, который это сверяет).
+BOT_COMMANDS = [
+    ("start", "Начать / краткая справка"),
+    ("today", "Снимок дня: встречи, задачи, платежи, инбокс"),
+    ("plan", "План на день с учётом целей"),
+    ("bills", "Платежи текущего месяца"),
+    ("memory", "Что я помню о тебе"),
+    ("forget", "Забыть тему из памяти"),
+    ("inbox", "Заметки на разбор"),
+]
+
+
+async def _set_bot_commands(app: Application) -> None:
+    """post_init: публикует BOT_COMMANDS в системное меню Telegram."""
+    await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
 
 
 def _snippet(text: str) -> str:
@@ -432,14 +452,16 @@ def build_application(
     )
     handlers = Handlers(memory, llm, facts, bills, tasks, calendar, action_log, inbox,
                         suggest_log, contacts, reads, recurring, obligations)
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_set_bot_commands).build()
     app.add_handler(CommandHandler("start", handlers.start))
+    app.add_handler(CommandHandler("today", handlers.today_cmd))
     app.add_handler(CommandHandler("plan", handlers.plan))
     app.add_handler(CommandHandler("bills", handlers.bills_cmd))
     app.add_handler(CommandHandler("memory", handlers.show_memory))
     app.add_handler(CommandHandler("forget", handlers.forget))
     app.add_handler(CommandHandler("inbox", handlers.inbox_cmd))
     app.add_handler(CallbackQueryHandler(handlers.mark_paid, pattern=f"^{BILL_PAID_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(handlers.mark_task_done, pattern=f"^{TASK_DONE_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.inbox_to_task, pattern=f"^{INBOX_TO_TASK_PREFIX}"))
     app.add_handler(CallbackQueryHandler(handlers.confirm_intent, pattern=r"^intent_(yes|no)$"))
     app.add_handler(CallbackQueryHandler(handlers.suggest_to_task, pattern=f"^{SUGGEST_TASK_PREFIX}"))
