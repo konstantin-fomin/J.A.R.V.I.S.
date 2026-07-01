@@ -186,6 +186,21 @@ def test_inbox_cmd_short_text_is_button_only(tmp_path):
     assert any("мысль про отпуск" in label for label in labels)
 
 
+def test_inbox_cmd_short_text_no_verbose_action_phrase(tmp_path):
+    # Подпись кнопки — компактный префикс + текст, как у задач («☑️ title») и
+    # платежей («✅ Оплачено · name»), а не проговорённая целиком фраза действия
+    # («→ в задачу: ...») — иначе короткая запись (частый случай) выглядит как
+    # старый многословный формат, который и должна была устранить render_actionable_list.
+    h, _, _, inbox, _ = _handlers(tmp_path)
+    inbox.create("мысль про отпуск")
+    message = FakeMessage()
+    asyncio.run(h.inbox_cmd(FakeUpdate(message), context=None))
+    call = message.calls[0]
+    labels = [b.text for row in call["reply_markup"].inline_keyboard for b in row]
+    assert labels == ["→ мысль про отпуск"]
+    assert "в задачу" not in labels[0]
+
+
 def test_inbox_cmd_long_text_shown_full_with_short_button(tmp_path):
     h, _, _, inbox, _ = _handlers(tmp_path)
     long_text = "Очень длинная мысль про отпуск, которая совершенно точно не влезет в кнопку Telegram целиком"

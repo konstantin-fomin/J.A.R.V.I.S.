@@ -556,7 +556,7 @@ class Handlers:
             group_lines, group_markup = render_actionable_list(
                 group,
                 is_actionable=lambda it: True,
-                button_label=lambda it: f"→ в задачу: {it['text']}",
+                button_label=lambda it: f"→ {it['text']}",
                 text_line=lambda it: f"• {it['text']}",
                 short_action=INBOX_SHORT_ACTION,
                 callback_data=lambda it: f"{INBOX_TO_TASK_PREFIX}{it['id']}",
